@@ -1,0 +1,25 @@
+/* Ported from the prototype's <helmet> style blocks. */
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0d1117; }
+* { box-sizing: border-box; }
+#root { height: 100%; }
+a { color: #7fb0ff; text-decoration: none; }
+a:hover { color: #a8c9ff; }
+input, textarea, select, button { font-family: 'Manrope', system-ui, sans-serif; color: inherit; }
+input, textarea, select {
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 10px;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: rgba(124, 160, 255, .65);
+  background: rgba(255, 255, 255, .09);
+}
+::placeholder { color: rgba(255, 255, 255, .32); }
+option { background: #161b22; color: #fff; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .16); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .3); }
+input[type=range] { accent-color: #4c8dff; background: transparent; border: 0; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.99); } to { opacity: 1; transform: none; } }

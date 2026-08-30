@@ -1,0 +1,12 @@
+node_modules
+dist
+
+# Extension signing key — the private half must never be committed
+.extension-key.pem
+.extension-key.txt
+
+*.local
+.DS_Store
+.claude/
+reference/
+share/
