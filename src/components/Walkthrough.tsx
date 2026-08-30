@@ -1,19 +1,23 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { css } from '../lib/css'
 import { Box } from './Box'
+import { LocusLogo } from './Logo'
 
 interface Step {
   /** value of a `data-tour="…"` attribute in App.tsx; omit for a centered step */
   target?: string
   title: string
   body: string
+  /** show the Locus lockup above the heading — the opening step only */
+  brand?: boolean
 }
 
 const STEPS: Step[] = [
   {
-    title: 'Welcome to Jarvis',
+    title: 'Welcome to Locus',
+    brand: true,
     body:
-      "This quick tour points out each part of your new tab. Use Next / Back (or ← →), or Skip any time. Everything here is stored locally in your browser — no account, nothing uploaded.",
+      "Locus is Latin for place — a point where something belongs. This quick tour points out each part of your new tab. Use Next / Back (or ← →), or Skip any time. Everything here is stored locally in your browser — no account, nothing uploaded.",
   },
   {
     target: 'pages',
@@ -208,6 +212,12 @@ export function Walkthrough({ onClose }: { onClose: () => void }) {
         }}
       >
         {!centred && <div style={arrowStyle()} />}
+
+        {step.brand && (
+          <div style={css('margin-bottom:13px; opacity:.9;')}>
+            <LocusLogo size={23} color="#fff" />
+          </div>
+        )}
 
         <div style={css('display:flex; align-items:center; gap:8px; margin-bottom:9px;')}>
           <div

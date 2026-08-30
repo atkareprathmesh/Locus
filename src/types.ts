@@ -99,7 +99,7 @@ export interface State extends PageData {
   dragOverPage: number | null
   gripArmed: number | null
 
-  /** Jarvis's own board display order (board ids). Boards not listed sort last. */
+  /** Locus's own board display order (board ids). Boards not listed sort last. */
   boardOrder: string[]
   /** Which page each board belongs to (board id -> page id). Unlisted = current page on next load. */
   boardPage: Record<string, number>

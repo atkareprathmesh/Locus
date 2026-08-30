@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Jarvis",
+  "name": "Locus",
   "version": "0.1.0",
-  "description": "Personal new-tab dashboard: bookmarks, tasks, notes, calendar journal and habits.",
+  "description": "Your place on the web. Bookmarks, tasks, habits, calendar, notes and journaling — every time you open a new tab.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwAnfza4UZenVAXdBiz3w9VPwCIkVh6aYeDTsEprZgO1t4BEyjw2qkVoRM+RJ5Php/G6a2vetXZNF7HU1Vb3MprWq9XNdFtwQ0kNcMCJhrNlZmn1Y9/8mNR174tnzUNFRRTyryFiscAdWljXJAmsGtv/pjmP8bdsFh9j/Hhq9kbvTGm52rK4LGu508Efx46oQLaoSZoTY8Vt0TIEjq/NFpoEHTaQ6V5li0HaTntOBNIwbm228AIVbxf5QTGtr/+hJJT8VMcMjbPUZh506lmDrb3+38qflSvmi5SJWbza+/Dq9Q2q93JUkKV4YF8pwC9WOHvIPkmgN2cELlXjuFWOBhwIDAQAB",
   "chrome_url_overrides": {
     "newtab": "index.html"

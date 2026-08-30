@@ -1,10 +1,13 @@
 import { normalizeLocal } from '../../lib/normalize'
 import { type Adapter, cleanText, emptyResult, looksLikeUrl, toEngine } from '../model'
 
-/** Jarvis's own `jarvis-backup.json`. */
-export const jarvisAdapter: Adapter = {
-  id: 'jarvis',
-  label: 'Jarvis backup',
+/**
+ * Locus's own `locus-backup.json`. Detection is structural, so backups exported
+ * by the pre-rename Jarvis builds (`jarvis-backup.json`) still import cleanly.
+ */
+export const locusAdapter: Adapter = {
+  id: 'locus',
+  label: 'Locus backup',
   detect: ({ json }) => {
     if (!json || typeof json !== 'object') return 0
     const o = json as Record<string, unknown>
@@ -18,7 +21,7 @@ export const jarvisAdapter: Adapter = {
   },
   parse: ({ json }) => {
     const o = (json ?? {}) as Record<string, unknown>
-    const r = emptyResult('Jarvis backup', 'exact')
+    const r = emptyResult('Locus backup', 'exact')
     const clean = normalizeLocal(o)
     r.notes = clean.notes ?? []
     r.tasks = clean.tasks ?? []

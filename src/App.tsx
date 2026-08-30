@@ -7,7 +7,7 @@ import { GappIcon } from './components/GappIcon'
 import { Walkthrough } from './components/Walkthrough'
 import { css } from './lib/css'
 import { open } from './lib/nav'
-import { debounce, store } from './lib/storage'
+import { debounce, migrateKeys, store } from './lib/storage'
 import { uid } from './lib/id'
 import { normalizeLocal } from './lib/normalize'
 import { type ImportResult, buildApplyPlan, parseImport } from './import'
@@ -43,10 +43,18 @@ import {
 } from './state'
 import type { Board, PageData, Priority, State } from './types'
 
-const BG_KEY = 'jarvis.bg'
-const LOCAL_KEY = 'jarvis.v1'
-const DEV_BOARDS_KEY = 'jarvis.devBoards'
-const ONBOARD_KEY = 'jarvis.onboarded'
+const BG_KEY = 'locus.bg'
+const LOCAL_KEY = 'locus.v1'
+const DEV_BOARDS_KEY = 'locus.devBoards'
+const ONBOARD_KEY = 'locus.onboarded'
+
+/** Pre-rename key names, carried over on first boot after the Jarvis → Locus rename. */
+const LEGACY_KEYS: [string, string][] = [
+  ['jarvis.v1', LOCAL_KEY],
+  ['jarvis.bg', BG_KEY],
+  ['jarvis.devBoards', DEV_BOARDS_KEY],
+  ['jarvis.onboarded', ONBOARD_KEY],
+]
 
 const localSlice = (s: State): PageData => ({
   notes: s.notes,
@@ -55,7 +63,7 @@ const localSlice = (s: State): PageData => ({
   dateNotes: s.dateNotes,
 })
 
-/** Sort boards by Jarvis's own order; boards not in the list keep their natural order at the end. */
+/** Sort boards by Locus's own order; boards not in the list keep their natural order at the end. */
 function orderBoards(boards: Board[], order: string[]): Board[] {
   const rank = new Map(order.map((id, i) => [id, i]))
   return [...boards].sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity))
@@ -122,6 +130,7 @@ export default function App() {
   useEffect(() => {
     let alive = true
     ;(async () => {
+      await migrateKeys(LEGACY_KEYS)
       const saved = await store.get<Partial<State>>(LOCAL_KEY)
       const bg = await store.get<string>(BG_KEY)
       if (!alive) return
@@ -217,7 +226,7 @@ export default function App() {
     if (loaded.current && !hasBookmarks) void store.set(DEV_BOARDS_KEY, s.boards)
   }, [s.boards])
 
-  // Any board Jarvis hasn't seen before (first load, or a folder created directly
+  // Any board Locus hasn't seen before (first load, or a folder created directly
   // in Chrome) is pinned to whatever page is active when it shows up.
   useEffect(() => {
     if (!loaded.current) return
@@ -303,7 +312,7 @@ export default function App() {
   }
 
   // ---- board ops (Chrome or local) -----------------------------------
-  /** Pin a board to a page (board id -> page id). Boards are per-page in Jarvis. */
+  /** Pin a board to a page (board id -> page id). Boards are per-page in Locus. */
   const assignBoard = (id: string, pageId: number) =>
     set((st) => ({
       boardPage: { ...st.boardPage, [id]: pageId },
@@ -658,7 +667,7 @@ export default function App() {
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
     const a = document.createElement('a')
     a.href = url
-    a.download = 'jarvis-backup.json'
+    a.download = 'locus-backup.json'
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -2538,7 +2547,7 @@ export default function App() {
                 )}
 
                 <div style={css('font-size:11px; color:rgba(255,255,255,.35); line-height:1.6;')}>
-                  Everything stays on this device. Import understands Jarvis backups, Boardmarks exports, browser
+                  Everything stays on this device. Import understands Locus backups, Boardmarks exports, browser
                   bookmark HTML files (Chrome / Firefox / Safari / Edge), Chrome's Bookmarks file, and makes a best-effort
                   pass at other JSON exports.
                 </div>
@@ -2792,7 +2801,7 @@ export default function App() {
                       const r = await openIncognito()
                       if (r === 'ok') closeModal()
                       else if (r === 'not-allowed')
-                        setIncognitoHint('Enable "Allow in Incognito" for Jarvis on chrome://extensions, then try again.')
+                        setIncognitoHint('Enable "Allow in Incognito" for Locus on chrome://extensions, then try again.')
                       else setIncognitoHint('Incognito is only available when running as an extension.')
                     }}
                     style={css('border-radius:11px; padding:10px 20px; font-size:12.5px; font-weight:600; cursor:pointer; color:#fff; background:rgba(76,141,255,.95);')}

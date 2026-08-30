@@ -1,12 +1,20 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { store } from '../lib/storage'
+import { LocusLogo } from './Logo'
 
 type Props = { children: ReactNode }
 type S = { error: Error | null }
 
-const LOCAL_KEY = 'jarvis.v1'
-const BG_KEY = 'jarvis.bg'
-const DEV_BOARDS_KEY = 'jarvis.devBoards'
+/** Includes the pre-rename `jarvis.*` names so a reset also clears data that
+ *  crashed before the Locus migration had a chance to run. */
+const RESET_KEYS = [
+  'locus.v1',
+  'locus.bg',
+  'locus.devBoards',
+  'jarvis.v1',
+  'jarvis.bg',
+  'jarvis.devBoards',
+]
 
 export class ErrorBoundary extends Component<Props, S> {
   state: S = { error: null }
@@ -16,14 +24,12 @@ export class ErrorBoundary extends Component<Props, S> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('Jarvis crashed:', error, info.componentStack)
+    console.error('Locus crashed:', error, info.componentStack)
   }
 
   private reset = async (withData: boolean) => {
     if (withData) {
-      await store.remove(LOCAL_KEY)
-      await store.remove(BG_KEY)
-      await store.remove(DEV_BOARDS_KEY)
+      for (const key of RESET_KEYS) await store.remove(key)
     }
     location.reload()
   }
@@ -55,9 +61,12 @@ export class ErrorBoundary extends Component<Props, S> {
             boxShadow: '0 28px 70px rgba(0,0,0,.5)',
           }}
         >
-          <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 8 }}>Jarvis hit an error loading your data</div>
+          <div style={{ marginBottom: 16, opacity: 0.85 }}>
+            <LocusLogo size={22} color="#fff" />
+          </div>
+          <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 8 }}>Locus hit an error loading your data</div>
           <div style={{ fontSize: 13, lineHeight: 1.6, color: 'rgba(255,255,255,.7)', marginBottom: 18 }}>
-            Usually a bad import file. Reset clears Jarvis's notes, tasks, habits, journal and background — your Chrome
+            Usually a bad import file. Reset clears Locus's notes, tasks, habits, journal and background — your Chrome
             bookmarks are never touched.
           </div>
           <pre
@@ -105,7 +114,7 @@ export class ErrorBoundary extends Component<Props, S> {
                 cursor: 'pointer',
               }}
             >
-              Reset Jarvis data
+              Reset Locus data
             </button>
           </div>
         </div>

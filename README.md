@@ -1,9 +1,42 @@
-# Jarvis — new-tab dashboard for Chrome
+<p align="center">
+  <img src="brand/banner.png" alt="Locus — your place on the web." width="100%">
+</p>
 
-Replaces the browser's new-tab page with a personal dashboard: bookmark boards
-that sync two-way with Chrome, a to-do list, quick notes, a calendar journal, a
-habit tracker, custom wallpaper, a search-engine switcher, a Google-apps
-launcher, plus real history and top sites.
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-3b82f6" alt="MIT license">
+  <img src="https://img.shields.io/badge/manifest-v3-3b82f6" alt="Manifest V3">
+  <img src="https://img.shields.io/badge/data-100%25%20local-22c55e" alt="100% local">
+</p>
+
+**Locus** comes from the Latin word for *place* — a point, position, or space
+where something belongs.
+
+Our attention is scattered across dozens of tabs, apps, bookmarks, notes and
+reminders. Locus creates one intentional place for the things that matter. Every
+time you open a new tab it brings your digital world together — your links,
+bookmarks, tasks, habits, calendar, notes and reflections — so you can see where
+you are, remember what matters, and decide what comes next.
+
+*Less scattered. More intentional.*
+
+<p align="center">
+  <img src="brand/screenshot.png" alt="The Locus dashboard: bookmark boards, notes, habits, calendar and tasks" width="100%">
+</p>
+
+---
+
+## What Locus does
+
+Locus replaces the browser's new-tab page with a personal dashboard for everyday
+life.
+
+- 🔖 **Organise your bookmarks** and important links into meaningful spaces
+- ✅ **Plan your tasks** and see what needs your attention
+- 🌱 **Build and track** everyday habits
+- 📅 **See your calendar** and upcoming plans
+- 📝 **Capture quick thoughts** and notes
+- 📖 **Reflect on your days** through date-based journaling
+- 🎨 **Personalise your space** with your own background and aesthetic
 
 **100% local.** No account, no server, no tracking. Everything is stored in
 `chrome.storage.local` on your machine and never leaves the browser. Bookmarks
@@ -22,7 +55,7 @@ Brave, and any other Chromium browser.
    it.
 2. **Build it:**
    ```bash
-   cd jarvis
+   cd Locus
    npm install
    npm run build
    ```
@@ -30,20 +63,20 @@ Brave, and any other Chromium browser.
 3. Open `chrome://extensions` (Edge: `edge://extensions`, Brave:
    `brave://extensions`).
 4. Turn on **Developer mode** (top-right toggle).
-5. Click **Load unpacked** and select the `jarvis/dist` folder.
+5. Click **Load unpacked** and select the `Locus/dist` folder.
 6. **Keep the `dist` folder where it is** — don't move or delete it. Chrome loads
    the extension from that path every time.
 7. Open a new tab. If Chrome asks *"An extension changed your New Tab page"* →
    **Keep it**.
 
 To update later: `git pull`, `npm run build` again, then click the ↻ reload icon
-on the Jarvis card in `chrome://extensions`.
+on the Locus card in `chrome://extensions`.
 
 To uninstall: `chrome://extensions` → **Remove**. Your normal new tab comes back.
 
 ### The "Developer mode extensions" bar
 
-Because Jarvis is loaded unpacked, Chrome shows a bar every time you start the
+Because Locus is loaded unpacked, Chrome shows a bar every time you start the
 browser:
 
 > **Disable developer mode extensions** — Extensions running in developer mode
@@ -64,7 +97,7 @@ It goes away entirely once the extension is installed from the Chrome Web Store.
 
 ## First run
 
-The first time you open a new tab, Jarvis:
+The first time you open a new tab, Locus:
 
 - runs a **guided walkthrough** that spotlights each part of the dashboard in
   turn — pages, search, boards, notes, habits, calendar, tasks, the toolbar —
@@ -83,11 +116,11 @@ The first time you open a new tab, Jarvis:
 - **Bookmark boards** — a board is a top-level folder under the Bookmarks Bar or
   Other Bookmarks. Add / rename / delete boards and bookmarks here and it writes
   through to your real Chrome bookmarks; external changes show up live. Drag the
-  ⠿ handle to reorder (Jarvis-local order, doesn't touch your bookmark bar).
+  ⠿ handle to reorder (Locus-local order, doesn't touch your bookmark bar).
   **Boards are per-page** — each board belongs to one page and only shows there.
   New boards land on the page you're on; move a board to another page with the
   ⇄ icon in its header (or drag its ⠿ handle onto a page tab). Any folder made
-  directly in Chrome shows up on whichever page is active when Jarvis first sees
+  directly in Chrome shows up on whichever page is active when Locus first sees
   it.
 - **Tasks** — due dates, times, priority, today / upcoming / done filters.
 - **Notes** — lightweight titled text notes.
@@ -113,7 +146,7 @@ The first time you open a new tab, Jarvis:
 ## Develop
 
 ```bash
-cd jarvis
+cd Locus
 npm install
 npm run dev      # http://localhost:5173
 ```
@@ -141,14 +174,15 @@ src/
   App.tsx            all state (useReducer) + layout + widgets + modals
   state.ts           constants, sample-data seeds, reducer, persisted-key list
   types.ts
-  components/        Box, Clock, Favicon, Walkthrough, ErrorBoundary
+  components/        Box, Clock, Favicon, Logo, Walkthrough, ErrorBoundary
   lib/               css (string->style parser), storage, nav, id, normalize
   chrome/            bookmarks, history, topsites, favicon, windows, env
   import/            format detection + adapters
 public/
   manifest.json      MV3
   fonts/             self-hosted Manrope + Material Symbols (woff2)
-  icons/             16 / 48 / 128 png
+  icons/             16 / 48 / 128 png  (generated from brand/)
+brand/               logo source SVGs, banner, screenshot
 ```
 
 ### Stable extension ID
@@ -161,6 +195,32 @@ ignore it, or delete the `key` line entirely and Chrome will assign an ID.
 
 ---
 
+## Brand
+
+The mark is a ring with a point at its centre — a *locus*: the place where
+something belongs.
+
+| File | Use |
+|---|---|
+| `brand/locus-mark.svg` | mark alone, light — on dark backgrounds |
+| `brand/locus-mark-dark.svg` | mark alone, dark — on light backgrounds |
+| `brand/locus-mark-tile.svg` | rounded dark tile — app icons, 48px and up |
+| `brand/locus-mark-tile-small.svg` | optical variant with a thicker ring, for 16px favicons |
+| `brand/locus-wordmark.svg` | "Locus" alone |
+| `brand/locus-logo-horizontal.svg` | mark + wordmark + tagline |
+| `brand/locus-logo-horizontal-notagline.svg` | mark + wordmark |
+| `brand/locus-logo-stacked.svg` | mark above wordmark |
+
+Ink `#F5F5F5`, ground `#0A0E14`, accent `#4C8DFF`. The wordmark is Manrope Bold.
+In the UI, use the `LocusMark` / `LocusLogo` components in
+`src/components/Logo.tsx` rather than importing the SVGs — they inherit the
+surrounding text colour and stay sharp at any size.
+
+The PNG icons in `public/icons/` are generated from these SVGs; regenerate them
+if the mark ever changes.
+
+---
+
 ## Import / export
 
 Settings → Import / export. Import detects the file format, shows a preview
@@ -170,7 +230,9 @@ notes/tasks/habits are skipped, so re-importing is a safe no-op.
 
 Supported:
 
-- **Jarvis backup** — `jarvis-backup.json` from Export
+- **Locus backup** — `locus-backup.json` from Export. Backups from the older
+  Jarvis builds (`jarvis-backup.json`) still import — detection is structural,
+  not filename-based
 - **Browser bookmarks HTML** — the `bookmarks.html` Chrome / Firefox / Safari /
   Edge export
 - **Chrome bookmarks file** — the raw `Bookmarks` JSON from a Chrome profile dir
@@ -185,7 +247,7 @@ Add a format by writing an adapter (`detect` + `parse`) in
 
 ## Privacy
 
-Jarvis requests these permissions and nothing else:
+Locus requests these permissions and nothing else:
 
 | Permission | Why |
 |---|---|

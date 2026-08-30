@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 320" width="880" height="320" role="img" aria-label="Locus — your place on the web.">
+  <style>
+    .wm { font-family: 'Manrope', 'Avenir Next', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+          font-weight: 700; letter-spacing: -5px; fill: #F5F5F5; }
+    .tl { font-family: 'Manrope', 'Avenir Next', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+          font-weight: 600; fill: #F5F5F5; fill-opacity: .58; }
+  </style>
+  <circle cx="150" cy="150" r="112" fill="none" stroke="#F5F5F5" stroke-width="20"/>
+  <circle cx="150" cy="150" r="32" fill="#F5F5F5"/>
+  <text class="wm" x="300" y="212" font-size="200">Locus</text>
+  <text class="tl" x="306" y="266" font-size="34" letter-spacing="5.2">YOUR PLACE ON THE WEB.</text>
+</svg>

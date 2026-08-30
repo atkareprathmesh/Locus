@@ -1,0 +1,7 @@
+<!-- Optical variant for 16px favicons: thicker ring + larger dot so the mark
+     survives being drawn ~1px wide. Use locus-mark-tile.svg at 48px and above. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Locus">
+  <rect width="512" height="512" rx="96" fill="#0A0E14"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#F5F5F5" stroke-width="52"/>
+  <circle cx="256" cy="256" r="62" fill="#F5F5F5"/>
+</svg>

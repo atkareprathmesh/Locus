@@ -3,11 +3,11 @@ import type { DateNote, Habit, Note, State, Task } from '../types'
 import { boardmarksAdapter } from './adapters/boardmarks'
 import { chromeJsonAdapter } from './adapters/chromeJson'
 import { genericAdapter } from './adapters/generic'
-import { jarvisAdapter } from './adapters/jarvis'
+import { locusAdapter } from './adapters/locus'
 import { netscapeAdapter } from './adapters/netscape'
 import type { Adapter, DetectInput, ImportResult } from './model'
 
-const ADAPTERS: Adapter[] = [jarvisAdapter, boardmarksAdapter, netscapeAdapter, chromeJsonAdapter, genericAdapter]
+const ADAPTERS: Adapter[] = [locusAdapter, boardmarksAdapter, netscapeAdapter, chromeJsonAdapter, genericAdapter]
 
 export type { ImportResult } from './model'
 

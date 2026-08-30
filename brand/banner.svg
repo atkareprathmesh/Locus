@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-label="Locus — your place on the web.">
+  <defs>
+    <radialGradient id="bg" cx="18%" cy="8%" r="120%">
+      <stop offset="0%" stop-color="#21405E"/>
+      <stop offset="42%" stop-color="#16283C"/>
+      <stop offset="72%" stop-color="#0F1A26"/>
+      <stop offset="100%" stop-color="#0B1119"/>
+    </radialGradient>
+    <style>
+      .wm { font-family: 'Manrope', 'Avenir Next', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            font-weight: 700; letter-spacing: -3.4px; fill: #F5F5F5; }
+      .tl { font-family: 'Manrope', 'Avenir Next', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            font-weight: 600; fill: #F5F5F5; fill-opacity: .55; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="420" fill="url(#bg)"/>
+
+  <!-- concentric echo of the mark, far right -->
+  <g stroke="#F5F5F5" fill="none" opacity=".05">
+    <circle cx="1140" cy="210" r="300" stroke-width="2"/>
+    <circle cx="1140" cy="210" r="212" stroke-width="2"/>
+    <circle cx="1140" cy="210" r="124" stroke-width="2"/>
+  </g>
+
+  <g transform="translate(150 210)">
+    <circle cx="0" cy="0" r="62" fill="none" stroke="#F5F5F5" stroke-width="11"/>
+    <circle cx="0" cy="0" r="18" fill="#F5F5F5"/>
+  </g>
+
+  <text class="wm" x="248" y="196" font-size="112">Locus</text>
+  <text class="tl" x="252" y="238" font-size="20" letter-spacing="3.4">YOUR PLACE ON THE WEB.</text>
+</svg>

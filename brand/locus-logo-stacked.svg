@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 530" width="620" height="530" role="img" aria-label="Locus">
+  <style>
+    .wm { font-family: 'Manrope', 'Avenir Next', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+          font-weight: 700; letter-spacing: -5px; fill: #F5F5F5; }
+  </style>
+  <circle cx="310" cy="170" r="120" fill="none" stroke="#F5F5F5" stroke-width="22"/>
+  <circle cx="310" cy="170" r="34" fill="#F5F5F5"/>
+  <text class="wm" x="310" y="490" font-size="200" text-anchor="middle">Locus</text>
+</svg>

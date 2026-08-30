@@ -123,8 +123,8 @@ export function seedLocal(): PageData {
   const notes: Note[] = [
     {
       id: 1,
-      title: 'Welcome to Jarvis 👋',
-      text: 'This is your new-tab dashboard. Everything lives locally in your browser — nothing is uploaded anywhere.\n\n• The left panel is your bookmarks, synced two-way with Chrome\n• Add tasks, notes, habits and a calendar journal\n• Set a wallpaper from the icon in the top-right\n\nThese sample cards are just examples — delete them whenever you like.',
+      title: 'Welcome to Locus 👋',
+      text: 'One place to return to every time you open a tab. Everything lives locally in your browser — nothing is uploaded anywhere.\n\n• The left panel is your bookmarks, synced two-way with Chrome\n• Add tasks, notes, habits and a calendar journal\n• Set a wallpaper from the icon in the top-right\n\nThese sample cards are just examples — delete them whenever you like.',
     },
     { id: 2, title: 'Quick note', text: 'Click a note to edit it. Use “+ Note” to add your own.' },
   ]
