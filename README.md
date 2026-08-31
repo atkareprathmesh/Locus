@@ -51,11 +51,17 @@ Built with Vite + React + TypeScript. Manifest V3.
 Not on the Chrome Web Store yet — load it manually. Works in Chrome, Edge,
 Brave, and any other Chromium browser.
 
-1. **Download the code** — clone this repo or use *Code → Download ZIP* and unzip
-   it.
-2. **Build it:**
+1. **Download the code:**
+   - **Clone** (recommended) — you get a `Locus/` folder:
+     ```bash
+     git clone https://github.com/atkareprathmesh/Locus.git
+     ```
+   - or **Code → Download ZIP** and unzip — GitHub names the folder
+     `Locus-main` (repo name + branch). That's normal; just `cd` into whatever
+     name you see.
+2. **Build it** (use the folder name from step 1 — `Locus` or `Locus-main`):
    ```bash
-   cd Locus
+   cd Locus        # or: cd Locus-main
    npm install
    npm run build
    ```
@@ -63,11 +69,19 @@ Brave, and any other Chromium browser.
 3. Open `chrome://extensions` (Edge: `edge://extensions`, Brave:
    `brave://extensions`).
 4. Turn on **Developer mode** (top-right toggle).
-5. Click **Load unpacked** and select the `Locus/dist` folder.
+5. Click **Load unpacked** and select the `dist` folder inside your project
+   folder (`Locus/dist` or `Locus-main/dist`).
 6. **Keep the `dist` folder where it is** — don't move or delete it. Chrome loads
    the extension from that path every time.
 7. Open a new tab. If Chrome asks *"An extension changed your New Tab page"* →
    **Keep it**.
+
+### Browsers that keep their own new tab (Comet, Arc, …)
+
+Some Chromium browsers — notably Perplexity **Comet** and **Arc** — don't let an
+unpacked extension replace the new-tab page, so opening a tab still shows their
+page. Locus still works there: **click the Locus toolbar icon** to open the
+dashboard in a tab. Pin the icon so it's always one click away.
 
 To update later: `git pull`, `npm run build` again, then click the ↻ reload icon
 on the Locus card in `chrome://extensions`.
@@ -180,6 +194,8 @@ src/
   import/            format detection + adapters
 public/
   manifest.json      MV3
+  sw.js              service worker — toolbar-icon fallback for browsers that
+                     keep their own new tab (Comet, Arc)
   fonts/             self-hosted Manrope + Material Symbols (woff2)
   icons/             16 / 48 / 128 png  (generated from brand/)
 brand/               logo source SVGs, banner, screenshot
