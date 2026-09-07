@@ -1,11 +1,19 @@
 export type Priority = 'easy' | 'medium' | 'hard'
 export type Engine = 'Google' | 'Images' | 'Bing' | 'DuckDuckGo' | 'YouTube'
-export type Filter = 'all' | 'today' | 'upcoming' | 'done'
+export type Filter = 'today' | 'backlog' | 'upcoming' | 'done' | 'all'
+/** Difficulty filter for the to-do list; 'any' disables it. */
+export type PrioFilter = Priority | 'any'
 
 export interface Note {
   id: number
   title: string
   text: string
+}
+
+export interface SubTask {
+  id: number
+  title: string
+  done: boolean
 }
 
 export interface Task {
@@ -15,6 +23,10 @@ export interface Task {
   time: string
   priority: Priority
   completed: boolean
+  /** 'none' | 'at' | minutes-before as a string ('5' | '15' | '60' | '1440') */
+  remind: string
+  /** Checklist steps belonging to this task. */
+  subs: SubTask[]
 }
 
 export interface Bookmark {
@@ -32,7 +44,7 @@ export interface Board {
 export interface Habit {
   id: number
   name: string
-  days: boolean[] // length 7, oldest -> newest
+  done: string[] // ISO 'YYYY-MM-DD' dates the habit was completed
 }
 
 export interface DateNote {
@@ -62,6 +74,13 @@ export interface State extends PageData {
   now: number
   monthOffset: number
   filter: Filter
+  /** Difficulty filter applied on top of `filter`. */
+  prioFilter: PrioFilter
+  /** Tasks whose sub-task list is expanded. */
+  openTasks: number[]
+  /** The task currently accepting a new sub-task, and its draft text. */
+  dSubFor: number | null
+  dSub: string
   engine: Engine
   enginesOpen: boolean
   query: string
@@ -73,6 +92,8 @@ export interface State extends PageData {
   h24: boolean
 
   // task form
+  /** Non-null while the task modal is editing an existing task. */
+  dTaskId: number | null
   dTitle: string
   dDue: string
   dTime: string
@@ -115,6 +136,11 @@ export interface State extends PageData {
   dnTitle: string
   dnDesc: string
   dnCat: string
+  /** The journal note opened as a full page inside the day drawer. */
+  dnOpen: number | null
+
+  /** User-controlled height share of the Quick Notes panel in the left rail. */
+  notesPanelHeight: number
 
   appsOpen: boolean
   gapps: string[]
@@ -130,6 +156,22 @@ export interface State extends PageData {
   lensPinned: boolean
 
   bgImage: string | null
+  /** How the wallpaper is framed: fill (crop) or fit, plus zoom and pan. */
+  bgFit: 'cover' | 'contain'
+  bgZoom: number
+  bgX: number
+  bgY: number
+  /** True while the full-screen wallpaper editor is open (not persisted). */
+  bgAdjust: boolean
+
+  /** Epoch ms of the last successful backup (0 = never). */
+  lastBackup: number
+  /** Days between automatic backups. 0 turns auto-backup off. */
+  backupEvery: number
+  /** Transient status line shown in Settings after a manual backup. */
+  backupMsg: string
+  /** Dismissed the "you haven't backed up" nudge for this session. */
+  backupNudge: boolean
 
   boards: Board[]
   history: HistoryRow[]

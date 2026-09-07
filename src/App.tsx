@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Box } from './components/Box'
+import { ReminderChip } from './components/ReminderChip'
+import TodoCard, { PRIO_META, inBucket } from './components/TodoCard'
 import { BmRow } from './components/BmRow'
 import { Clock } from './components/Clock'
 import { Favicon } from './components/Favicon'
 import { GappIcon } from './components/GappIcon'
-import { Walkthrough } from './components/Walkthrough'
+import { DEFAULT_BG, Wallpaper, WallpaperAdjust, type BgTransform } from './components/Wallpaper'
 import { css } from './lib/css'
 import { open } from './lib/nav'
 import { debounce, migrateKeys, store } from './lib/storage'
 import { uid } from './lib/id'
 import { normalizeLocal } from './lib/normalize'
-import { type ImportResult, buildApplyPlan, parseImport } from './import'
+import { backupOverdue, daysSince, writeBackup } from './lib/backup'
+import { syncReminders } from './lib/reminders'
+import type { ImportResult } from './import/model'
 import { hasBookmarks, isExtension } from './chrome/env'
 import {
   addBookmark as bmAdd,
@@ -30,7 +34,6 @@ import {
   CATS,
   DEFAULT_GAPPS,
   ENGINES,
-  FEEDBACK_URL,
   GAPP_CATALOG,
   PERSIST_KEYS,
   dotFor,
@@ -41,12 +44,21 @@ import {
   reducer,
   stamp,
 } from './state'
-import type { Board, PageData, Priority, State } from './types'
+import type { Board, Habit, PageData, State, Task } from './types'
+
+// Rarely-opened surfaces are split out of the new-tab bundle: this page renders
+// on every single tab, so anything behind a click can load on demand instead.
+const Walkthrough = lazy(() => import('./components/Walkthrough').then((m) => ({ default: m.Walkthrough })))
+const HabitsModal = lazy(() => import('./modals/HabitsModal'))
+const SettingsModal = lazy(() => import('./modals/SettingsModal'))
+const ImportModal = lazy(() => import('./modals/ImportModal'))
+const ShortcutsModal = lazy(() => import('./modals/ShortcutsModal'))
 
 const BG_KEY = 'locus.bg'
 const LOCAL_KEY = 'locus.v1'
 const DEV_BOARDS_KEY = 'locus.devBoards'
 const ONBOARD_KEY = 'locus.onboarded'
+const JOURNAL_DRAFT_KEY = 'locus.journalDraft'
 
 /** Pre-rename key names, carried over on first boot after the Jarvis → Locus rename. */
 const LEGACY_KEYS: [string, string][] = [
@@ -92,6 +104,44 @@ function devSeedBoards(): Board[] {
   ]
 }
 
+
+/** Framing reset applied when a new wallpaper is picked or one is removed. */
+const DEFAULT_BG_STATE = { bgFit: DEFAULT_BG.fit, bgZoom: DEFAULT_BG.zoom, bgX: DEFAULT_BG.x, bgY: DEFAULT_BG.y }
+
+type JournalDraft = { date: string; editing: number | null; title: string; desc: string; cat: string }
+function plainJournalText(text: string) {
+  return text
+    .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/(div|p|h[1-6]|li)>/gi, '\n')
+    .replace(/<hr\s*\/?\s*>/gi, '\n--------------------\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/^\s*#{1,4}\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
+function journalTitleFromBody(text: string) {
+  return plainJournalText(text).replace(/\s+/g, ' ').trim().slice(0, 80)
+}
+
+type PomodoroMode = 'work' | 'break'
+type PomodoroState = {
+  workMinutes: number
+  breakMinutes: number
+  mode: PomodoroMode
+  secondsLeft: number
+  running: boolean
+}
+
+const POMODORO_DEFAULTS = { workMinutes: 25, breakMinutes: 5 }
+
+const formatPomodoro = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+
 export default function App() {
   const [state, dispatch] = useReducer(reducer, undefined, makeInitialState)
   const s = state
@@ -104,12 +154,87 @@ export default function App() {
 
   const [showTour, setShowTour] = useState(false)
   const [boardMenu, setBoardMenu] = useState<string | null>(null)
+  const [pomodoroSettingsOpen, setPomodoroSettingsOpen] = useState(false)
+  const [pomodoro, setPomodoro] = useState<PomodoroState>({
+    ...POMODORO_DEFAULTS,
+    mode: 'work',
+    secondsLeft: POMODORO_DEFAULTS.workMinutes * 60,
+    running: false,
+  })
+
+  useEffect(() => {
+    if (!pomodoro.running) return
+    const timer = window.setInterval(() => {
+      setPomodoro((current) => {
+        if (current.secondsLeft > 1) return { ...current, secondsLeft: current.secondsLeft - 1 }
+        const nextMode: PomodoroMode = current.mode === 'work' ? 'break' : 'work'
+        return {
+          ...current,
+          mode: nextMode,
+          secondsLeft: (nextMode === 'work' ? current.workMinutes : current.breakMinutes) * 60,
+        }
+      })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [pomodoro.running])
+
+  const resetPomodoro = useCallback(() => {
+    setPomodoro((current) => ({ ...current, mode: 'work', secondsLeft: current.workMinutes * 60, running: false }))
+  }, [])
+
+  const updatePomodoroDuration = useCallback((key: 'workMinutes' | 'breakMinutes', value: number) => {
+    const minutes = Math.max(1, Math.min(90, Math.round(value) || 1))
+    setPomodoro((current) => ({
+      ...current,
+      [key]: minutes,
+      secondsLeft: current.mode === (key === 'workMinutes' ? 'work' : 'break') ? minutes * 60 : current.secondsLeft,
+      running: false,
+    }))
+  }, [])
 
   const searchRef = useRef<HTMLInputElement>(null)
+  const journalRef = useRef<HTMLTextAreaElement>(null)
+  const journalEditorRef = useRef<HTMLDivElement>(null)
+  const journalDraftHydrated = useRef(false)
   const undoTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loaded = useRef(false)
   const stateRef = useRef(state)
   stateRef.current = state
+
+  const switchPageTo = useCallback(
+    (id: number) =>
+      set((st) => {
+        if (id === st.activePage) return {}
+        const pageData = { ...st.pageData, [st.activePage]: localSlice(st) }
+        const load = pageData[id] ?? emptyLocal()
+        return { pageData, activePage: id, modal: null, dateOpen: null, filter: 'today', ...load }
+      }),
+    [set],
+  )
+
+  const newNote = useCallback(() => {
+    const id = Date.now()
+    set((st) => ({ notes: [...st.notes, { id, title: '', text: '' }], modal: 'note', activeNote: id }))
+  }, [set])
+
+  const newTask = useCallback(
+    () => set({ modal: 'task', dTaskId: null, dTitle: '', dDue: iso(new Date()), dTime: '', dPrio: 'medium', dRemind: 'none' }),
+    [set],
+  )
+
+  const editTask = useCallback(
+    (t: Task) =>
+      set({
+        modal: 'task',
+        dTaskId: t.id,
+        dTitle: t.title,
+        dDue: t.due,
+        dTime: t.time,
+        dPrio: t.priority,
+        dRemind: t.remind,
+      }),
+    [set],
+  )
 
   const readLens = useCallback(
     (file: File, label?: string) => {
@@ -145,27 +270,12 @@ export default function App() {
         if (alive) set({ boards: dev })
       }
 
-      // First run: seed one sample board (if the user has no folders yet) and
-      // show the walkthrough. Runs once — guarded by ONBOARD_KEY.
+      // First run: show the walkthrough. No sample board is created — a new
+      // user gets the boards empty state instead, which offers to build one
+      // from their own most-visited sites. Runs once, guarded by ONBOARD_KEY.
       const onboarded = await store.get<boolean>(ONBOARD_KEY)
       if (!alive) return
       if (!onboarded) {
-        if (hasBookmarks) {
-          const existing = await readBoards()
-          if (!existing.length) {
-            try {
-              const id = await createBoard('Getting started')
-              await bmAdd(id, 'Gmail', 'https://mail.google.com')
-              await bmAdd(id, 'YouTube', 'https://youtube.com')
-              await bmAdd(id, 'GitHub', 'https://github.com')
-              await bmAdd(id, 'Google Calendar', 'https://calendar.google.com')
-              const boards = await readBoards()
-              if (alive) set((st) => ({ boards, boardPage: { ...st.boardPage, [id]: 1 } }))
-            } catch {
-              /* bookmarks API unavailable — skip the sample board */
-            }
-          }
-        }
         await store.set(ONBOARD_KEY, true)
         if (alive) setShowTour(true)
       }
@@ -192,6 +302,39 @@ export default function App() {
       }, 250),
     [],
   )
+  const saveJournalDraft = useMemo(
+    () =>
+      debounce((draft: JournalDraft) => {
+        void store.set(JOURNAL_DRAFT_KEY, draft)
+      }, 180),
+    [],
+  )
+
+  useEffect(() => {
+    if (!s.dnFormOpen || !s.dateOpen) {
+      journalDraftHydrated.current = false
+      return
+    }
+    let alive = true
+    journalDraftHydrated.current = false
+    void (async () => {
+      const draft = await store.get<JournalDraft>(JOURNAL_DRAFT_KEY)
+      if (!alive) return
+      if (draft && draft.date === s.dateOpen && draft.editing === s.dnEditing) {
+        set({ dnTitle: draft.title, dnDesc: draft.desc, dnCat: draft.cat })
+      }
+      journalDraftHydrated.current = true
+    })()
+    return () => {
+      alive = false
+    }
+  }, [s.dnFormOpen, s.dateOpen, s.dnEditing, set])
+
+  useEffect(() => {
+    if (!s.dnFormOpen || !s.dateOpen || !journalDraftHydrated.current) return
+    saveJournalDraft({ date: s.dateOpen, editing: s.dnEditing, title: s.dnTitle, desc: s.dnDesc, cat: s.dnCat })
+  }, [s.dnFormOpen, s.dateOpen, s.dnEditing, s.dnTitle, s.dnDesc, s.dnCat, saveJournalDraft])
+
   useEffect(() => {
     if (!loaded.current) return
     const snap: Partial<State> = {}
@@ -204,15 +347,24 @@ export default function App() {
     s.tasks,
     s.habits,
     s.dateNotes,
+    s.notesPanelHeight,
     s.pages,
     s.activePage,
     s.pageData,
     s.h24,
     s.engine,
     s.filter,
+    s.prioFilter,
     s.gapps,
     s.gappsOn,
     s.boardOrder,
+    s.boardPage,
+    s.lastBackup,
+    s.backupEvery,
+    s.bgFit,
+    s.bgZoom,
+    s.bgX,
+    s.bgY,
     saveLocal,
   ])
 
@@ -225,6 +377,38 @@ export default function App() {
   useEffect(() => {
     if (loaded.current && !hasBookmarks) void store.set(DEV_BOARDS_KEY, s.boards)
   }, [s.boards])
+
+  // ---- backups ------------------------------------------------------------
+  // Chrome offers no hook before an uninstall or a profile wipe, so the only
+  // real protection is a copy that already lives outside the extension. Auto
+  // backups land in the Downloads folder on a schedule; the nudge covers the
+  // case where that silently isn't happening.
+  const runBackup = useCallback(
+    async (auto: boolean) => {
+      const ok = await writeBackup(stateRef.current, auto)
+      if (ok) set({ lastBackup: Date.now(), backupMsg: auto ? '' : 'Saved to your Downloads folder.' })
+      else if (!auto) set({ backupMsg: 'Could not write the backup file.' })
+      return ok
+    },
+    [set],
+  )
+
+  const backupChecked = useRef(false)
+  useEffect(() => {
+    if (!loaded.current || backupChecked.current || !s.backupEvery) return
+    backupChecked.current = true
+    const due = !s.lastBackup || Date.now() - s.lastBackup > s.backupEvery * 86_400_000
+    const hasData = s.notes.length + s.tasks.length + s.habits.length > 0
+    if (due && hasData) void runBackup(true)
+  }, [s.backupEvery, s.lastBackup, s.notes.length, s.tasks.length, s.habits.length, runBackup])
+
+  // ---- task reminders -----------------------------------------------------
+  // chrome.alarms is the source of truth for firing; this keeps it in step with
+  // whatever the task list currently says.
+  useEffect(() => {
+    if (!loaded.current) return
+    void syncReminders(s.tasks)
+  }, [s.tasks])
 
   // Any board Locus hasn't seen before (first load, or a folder created directly
   // in Chrome) is pinned to whatever page is active when it shows up.
@@ -244,6 +428,10 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setBoardMenu(null)
+        // The search box takes focus on load so a new tab is type-to-search.
+        // Escape steps out of it, which is also what unlocks the single-key
+        // shortcuts below.
+        if (document.activeElement === searchRef.current) searchRef.current?.blur()
         set({
           modal: null,
           dateOpen: null,
@@ -260,9 +448,55 @@ export default function App() {
           dragOverBm: null,
           bmReturn: false,
         })
-      } else if (e.key === '/' && searchRef.current && document.activeElement !== searchRef.current) {
+        return
+      }
+
+      // Never steal a keystroke that belongs to a field the user is in.
+      const el = document.activeElement as HTMLElement | null
+      const typing =
+        !!el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName))
+      if (typing || e.metaKey || e.ctrlKey || e.altKey) return
+
+      if (e.key === '/') {
         e.preventDefault()
-        searchRef.current.focus()
+        searchRef.current?.focus()
+        return
+      }
+
+      // The rest only make sense on the dashboard itself.
+      const st = stateRef.current
+      if (st.modal || st.dateOpen || st.bgAdjust) return
+
+      if (e.key >= '1' && e.key <= '9') {
+        const page = st.pages[Number(e.key) - 1]
+        if (page) {
+          e.preventDefault()
+          switchPageTo(page.id)
+        }
+        return
+      }
+
+      switch (e.key.toLowerCase()) {
+        case 'n':
+          e.preventDefault()
+          newNote()
+          break
+        case 't':
+          e.preventDefault()
+          newTask()
+          break
+        case 'h':
+          e.preventDefault()
+          set({ modal: 'habits' })
+          break
+        case 'b':
+          e.preventDefault()
+          set({ modal: 'bmsearch', bmQuery: '' })
+          break
+        case '?':
+          e.preventDefault()
+          set({ modal: 'shortcuts' })
+          break
       }
     }
     const onPaste = (e: ClipboardEvent) => {
@@ -285,7 +519,7 @@ export default function App() {
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('paste', onPaste)
     }
-  }, [set, readLens])
+  }, [set, readLens, switchPageTo, newNote, newTask])
 
   useEffect(() => {
     void readTopSites().then((topSites) => set({ topSites }))
@@ -303,12 +537,23 @@ export default function App() {
     set((st) => ({ ...mutator(st), undo: { label, snapshot } }))
   }
 
+  // Wallpaper framing (fit / zoom / pan) as one value for <Wallpaper>.
+  const bgT: BgTransform = { fit: s.bgFit, zoom: s.bgZoom, x: s.bgX, y: s.bgY }
+  const setBgT = (t: BgTransform) => set({ bgFit: t.fit, bgZoom: t.zoom, bgX: t.x, bgY: t.y })
+
   const onBgFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     const r = new FileReader()
-    r.onload = (ev) => set({ bgImage: String(ev.target?.result ?? '') })
+    r.onload = (ev) =>
+      set({
+        bgImage: String(ev.target?.result ?? ''),
+        ...DEFAULT_BG_STATE,
+        bgAdjust: true,
+        modal: null,
+      })
     r.readAsDataURL(file)
+    e.target.value = ''
   }
 
   // ---- board ops (Chrome or local) -----------------------------------
@@ -438,14 +683,7 @@ export default function App() {
   }
 
   // ---- page switching -------------------------------------------------
-  const switchPage = (id: number) => {
-    if (id === s.activePage) return
-    set((st) => {
-      const pageData = { ...st.pageData, [st.activePage]: localSlice(st) }
-      const load = pageData[id] ?? emptyLocal()
-      return { pageData, activePage: id, modal: null, dateOpen: null, filter: 'today', ...load }
-    })
-  }
+  const switchPage = switchPageTo
   const addPage = () =>
     set((st) => {
       const id = Date.now()
@@ -539,19 +777,37 @@ export default function App() {
   // calendar
   const base = new Date(today.getFullYear(), today.getMonth() + s.monthOffset, 1)
   const dim = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate()
-  const calDays: { label: string; today: boolean; has: boolean; dayIso: string | null }[] = []
-  for (let i = 0; i < base.getDay(); i++) calDays.push({ label: '', today: false, has: false, dayIso: null })
+  // a day is marked when it carries habits, tasks or journal notes — the three
+  // things the calendar now gathers in one place.
+  const habitDoneDays = new Set<string>()
+  for (const h of s.habits) for (const d of h.done) habitDoneDays.add(d)
+  const taskDueDays = new Set(s.tasks.filter((x) => !x.completed).map((x) => x.due))
+  const emptyMarks = { habit: false, task: false, note: false }
+  const calDays: { label: string; today: boolean; marks: typeof emptyMarks; dayIso: string | null }[] = []
+  for (let i = 0; i < base.getDay(); i++) calDays.push({ label: '', today: false, marks: emptyMarks, dayIso: null })
   for (let d = 1; d <= dim; d++) {
     const dayIso = iso(new Date(base.getFullYear(), base.getMonth(), d))
     calDays.push({
       label: String(d),
       today: s.monthOffset === 0 && d === today.getDate(),
-      has: (s.dateNotes[dayIso] || []).length > 0,
+      marks: {
+        habit: habitDoneDays.has(dayIso),
+        task: taskDueDays.has(dayIso),
+        note: (s.dateNotes[dayIso] || []).length > 0,
+      },
       dayIso,
     })
   }
+  const MARK_COLORS = { habit: 'rgba(93,202,165,.95)', task: 'rgba(239,159,39,.95)', note: 'rgba(133,183,235,.95)' }
   const catColor = (n: string) => (CATS.find((c) => c.name === n) || CATS[4]).color
   const dayList = s.dateOpen ? s.dateNotes[s.dateOpen] || [] : []
+  const dayTasks = s.dateOpen ? s.tasks.filter((x) => x.due === s.dateOpen) : []
+  const openNote = s.dnOpen != null ? dayList.find((n) => n.id === s.dnOpen) || null : null
+  /** Clock time of a journal entry, for the corner stamp. */
+  const clock = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+
+  const toggleTask = (id: number) =>
+    set((st) => ({ tasks: st.tasks.map((x) => (x.id === id ? { ...x, completed: !x.completed } : x)) }))
 
   // notes
   const noteTitle = (n: { title: string; text: string }) =>
@@ -559,36 +815,31 @@ export default function App() {
   const activeNote = s.notes.find((n) => n.id === s.activeNote) || { id: 0, title: '', text: '' }
 
   // tasks
-  const prioMeta: Record<Priority, { bg: string; fg: string }> = {
-    easy: { bg: 'rgba(52,211,153,.16)', fg: 'rgba(110,231,183,.95)' },
-    medium: { bg: 'rgba(251,191,36,.16)', fg: 'rgba(253,214,110,.95)' },
-    hard: { bg: 'rgba(251,113,133,.16)', fg: 'rgba(253,164,175,.95)' },
-  }
-  const visibleTasks = s.tasks.filter((t) => {
-    if (s.filter === 'done') return t.completed
-    if (t.completed) return false
-    if (s.filter === 'all') return true
-    return s.filter === 'today' ? t.due <= todayIso : t.due > todayIso
-  })
+  const prioMeta = PRIO_META
+  const visibleTasks = s.tasks.filter(
+    (t) => inBucket(t, s.filter, todayIso) && (s.prioFilter === 'any' || t.priority === s.prioFilter),
+  )
   const emptyTaskLine =
     s.filter === 'done'
       ? 'Nothing completed yet.'
       : s.filter === 'upcoming'
         ? 'Nothing scheduled ahead.'
-        : "You're all caught up."
+        : s.filter === 'backlog'
+          ? 'Nothing overdue — nice.'
+          : s.filter === 'today'
+            ? 'Nothing due today.'
+            : "You're all caught up."
 
-  // habits
-  const habitCols: string[] = []
-  for (let i = 6; i >= 0; i--)
-    habitCols.push(new Date(+today - i * 86400000).toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 2).toUpperCase())
-  const habitRows = s.habits.map((h) => {
-    let streak = 0
-    for (let i = h.days.length - 1; i >= 0; i--) {
-      if (h.days[i]) streak++
-      else break
-    }
-    return { ...h, streak }
-  })
+  const toggleHabitDay = (id: number, dayIso: string) =>
+    set((st) => ({
+      habits: st.habits.map((x) =>
+        x.id === id
+          ? { ...x, done: x.done.includes(dayIso) ? x.done.filter((d) => d !== dayIso) : [...x.done, dayIso] }
+          : x,
+      ),
+    }))
+  const deleteHabit = (h: Habit) =>
+    withUndo('Habit deleted', ['habits'], (st) => ({ habits: st.habits.filter((x) => x.id !== h.id) }))
 
   // suggestions
   const sq = s.query.trim().toLowerCase()
@@ -622,6 +873,9 @@ export default function App() {
   const bmCount = pageBoards.reduce((a, b) => a + b.bookmarks.length, 0)
   const orderedBoards = orderBoards(pageBoards, s.boardOrder)
 
+  const backupAge = daysSince(s.lastBackup)
+  const showBackupNudge = !s.backupNudge && backupOverdue(s)
+
   // bookmark search results
   const bq = s.bmQuery.trim().toLowerCase()
   const bmResults = orderedBoards
@@ -651,6 +905,7 @@ export default function App() {
     histpage: 'History',
     privacy: 'Privacy mode',
     clearhistory: 'Clear history',
+    shortcuts: 'Keyboard shortcuts',
   }
 
   // ---- import / export --------------------------------------------
@@ -679,12 +934,11 @@ export default function App() {
     e.target.value = ''
     if (!file) return
     setParsed(null)
-    void file
-      .text()
-      .then((text) => {
+    void Promise.all([file.text(), import('./import')])
+      .then(([text, { parseImport }]) => {
         const result = parseImport(file.name, text)
         const total =
-          result.boards.reduce((a, b) => a + b.bookmarks.length, 0) +
+          result.boards.reduce((a: number, b: { bookmarks: unknown[] }) => a + b.bookmarks.length, 0) +
           result.notes.length +
           result.tasks.length +
           result.habits.length +
@@ -718,6 +972,7 @@ export default function App() {
     if (!parsed) return
     setImporting(true)
     try {
+      const { buildApplyPlan } = await import('./import')
       const { patch, boards } = buildApplyPlan(parsed, stateRef.current)
       set(patch)
       for (const ib of boards) {
@@ -743,6 +998,16 @@ export default function App() {
 
   const [incognitoHint, setIncognitoHint] = useState('')
 
+  // Empty-state shortcut: turn a few most-visited sites into a starter board.
+  const [pickedSites, setPickedSites] = useState<string[]>([])
+  const addPickedSites = async () => {
+    if (!pickedSites.length) return
+    const chosen = s.topSites.filter((x) => pickedSites.includes(x.url))
+    setPickedSites([])
+    const id = await addBoard('Quick links')
+    for (const site of chosen) await addBookmarkTo(id, site.title || site.url, site.url)
+  }
+
   // ================================================================
   return (
     <div
@@ -751,7 +1016,7 @@ export default function App() {
       )}
     >
       {s.bgImage ? (
-        <img src={s.bgImage} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
+        <Wallpaper src={s.bgImage} t={bgT} />
       ) : (
         <>
           <div
@@ -768,9 +1033,14 @@ export default function App() {
       )}
 
       <div
-        style={css(
-          'position:relative; z-index:1; height:100%; display:flex; flex-direction:column; gap:clamp(8px,1.2vh,14px); padding:clamp(14px,2vh,22px) clamp(62px,4.6vw,78px) clamp(12px,1.8vh,20px) clamp(16px,1.5vw,26px);',
-        )}
+        style={{
+          ...css(
+            'position:relative; z-index:1; height:100%; display:flex; flex-direction:column; gap:clamp(8px,1.2vh,14px); padding:clamp(14px,2vh,22px) clamp(62px,4.6vw,78px) clamp(12px,1.8vh,20px) clamp(16px,1.5vw,26px);',
+          ),
+          // Hide the dashboard while framing the wallpaper so what you drag is
+          // exactly what you get.
+          ...(s.bgAdjust ? { opacity: 0.12, pointerEvents: 'none' as const } : null),
+        }}
       >
         {/* Top bar */}
         <div style={css('display:flex; align-items:center; gap:clamp(10px,1.2vw,18px); flex-shrink:0;')}>
@@ -1220,18 +1490,51 @@ export default function App() {
           {(s.pages.find((p) => p.id === s.activePage)?.name || 'HOME').toUpperCase()}
         </div>
 
+        {showBackupNudge && (
+          <div
+            style={css(
+              'flex-shrink:0; display:flex; align-items:center; gap:12px; background:rgba(251,191,36,.1); border:1px solid rgba(251,191,36,.3); border-radius:12px; padding:9px 14px;',
+            )}
+          >
+            <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(253,214,110,.95); flex-shrink:0;")}>
+              cloud_off
+            </span>
+            <span style={css('flex:1; min-width:0; font-size:11.5px; color:rgba(255,255,255,.8); line-height:1.5;')}>
+              {backupAge === null
+                ? 'Your Locus data has never been backed up. Removing the extension or resetting your profile deletes it for good.'
+                : `Last backup was ${backupAge} days ago. A copy in your Downloads folder survives an uninstall.`}
+            </span>
+            <Box
+              onClick={() => void runBackup(false)}
+              sx="flex-shrink:0; background:rgba(251,191,36,.22); border:1px solid rgba(251,191,36,.4); border-radius:9px; padding:6px 13px; font-size:11.5px; font-weight:600; color:rgba(255,231,168,.98); cursor:pointer; white-space:nowrap;"
+              hover="background:rgba(251,191,36,.34)"
+            >
+              Back up now
+            </Box>
+            <Box
+              onClick={() => set({ backupNudge: true })}
+              title="Dismiss"
+              sx="flex-shrink:0; font-family:'Material Symbols Rounded'; line-height:1; font-size:16px; color:rgba(255,255,255,.4); cursor:pointer;"
+              hover="color:#fff"
+            >
+              close
+            </Box>
+          </div>
+        )}
+
         {/* Body grid */}
         <div
+          className="dashboard-grid"
           style={css(
-            'flex:1; min-height:0; display:grid; grid-template-columns:minmax(190px,15.5vw) minmax(0,1fr) minmax(250px,20vw); gap:clamp(12px,1.4vw,24px);',
+            'flex:1; min-height:0; display:grid; grid-template-columns:minmax(235px,.82fr) minmax(0,1.8fr) minmax(235px,.82fr); gap:clamp(12px,1.4vw,24px);',
           )}
         >
           {/* Left rail */}
-          <div style={css('display:flex; flex-direction:column; gap:clamp(10px,1.2vh,16px); min-height:0;')}>
+          <div className="dashboard-left" style={css('display:flex; flex-direction:column; gap:clamp(10px,1.2vh,16px); min-height:0;')}>
             <div
               data-tour="notes"
               style={css(
-                'flex: 1.3; min-height: 0; background: rgba(9,13,20,.34); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.1); border-radius: 18px; box-shadow: 0 8px 30px rgba(0,0,0,.26); padding: clamp(12px,1.6vh,16px); display: flex; flex-direction: column; gap: 10px; overflow: hidden',
+                'flex: 0 0 ' + s.notesPanelHeight + '%; min-height: 0; background: rgba(9,13,20,.34); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.1); border-radius: 18px; box-shadow: 0 8px 30px rgba(0,0,0,.26); padding: clamp(12px,1.6vh,16px); display: flex; flex-direction: column; gap: 10px; overflow: hidden',
               )}
             >
               <div style={css('display:flex; align-items:center; justify-content:space-between; flex-shrink:0;')}>
@@ -1239,18 +1542,30 @@ export default function App() {
                   <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(255,255,255,.5);")}>
                     sticky_note_2
                   </span>
-                  <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Notes</span>
+                  <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Quick Notes</span>
                 </div>
-                <Box
-                  onClick={() => {
-                    const id = Date.now()
-                    set((st) => ({ notes: [...st.notes, { id, title: '', text: '' }], modal: 'note', activeNote: id }))
-                  }}
-                  sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-size:14px; color:rgba(255,255,255,.5); cursor:pointer;"
-                  hover="background:rgba(255,255,255,.1); color:#fff"
-                >
-                  +
-                </Box>
+                <div style={css('display:flex; align-items:center; gap:7px;')}>
+                  <input
+                    type="range"
+                    min="28"
+                    max="72"
+                    step="2"
+                    value={s.notesPanelHeight}
+                    aria-label="Quick Notes panel size"
+                    title="Resize Quick Notes"
+                    onChange={(e) => set({ notesPanelHeight: Number(e.target.value) })}
+                    style={css('width:58px; height:12px; accent-color:#6ea0ff; cursor:ew-resize;')}
+                  />
+                  <Box
+                    onClick={newNote}
+                    title="New note (n)"
+                    aria-label="New note"
+                    sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-size:14px; color:rgba(255,255,255,.5); cursor:pointer;"
+                    hover="background:rgba(255,255,255,.1); color:#fff"
+                  >
+                    +
+                  </Box>
+                </div>
               </div>
               <div style={css('flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:4px;')}>
                 {s.notes.map((n) => (
@@ -1271,110 +1586,39 @@ export default function App() {
                   </Box>
                 ))}
                 {s.notes.length === 0 && (
-                  <div
-                    onClick={() => {
-                      const id = Date.now()
-                      set((st) => ({ notes: [...st.notes, { id, title: '', text: '' }], modal: 'note', activeNote: id }))
-                    }}
-                    style={css('font-size:12px; color:rgba(255,255,255,.35); cursor:pointer; line-height:1.6; padding:2px;')}
+                  <Box
+                    onClick={newNote}
+                    sx="border:1px dashed rgba(255,255,255,.16); border-radius:11px; padding:14px 12px; text-align:center; cursor:pointer;"
+                    hover="background:rgba(255,255,255,.05); border-color:rgba(255,255,255,.28)"
                   >
-                    Nothing captured yet. Tap + to start a note.
-                  </div>
+                    <div style={css('font-size:11.5px; font-weight:600; color:rgba(255,255,255,.7);')}>Write your first note</div>
+                    <div style={css('font-size:10.5px; color:rgba(255,255,255,.35); margin-top:4px; line-height:1.5;')}>
+                      Tap + or press <b style={css('color:rgba(255,255,255,.6);')}>n</b> anywhere.
+                    </div>
+                  </Box>
                 )}
               </div>
             </div>
 
-            {/* Habits mini */}
-            <div
-              data-tour="habits"
-              style={css(
-                'flex:1; min-height:0; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(12px,1.6vh,16px); display:flex; flex-direction:column; gap:10px;',
-              )}
-            >
-              <div style={css('display:flex; align-items:center; justify-content:space-between; flex-shrink:0;')}>
-                <div style={css('display:flex; align-items:center; gap:8px;')}>
-                  <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(255,255,255,.5);")}>repeat</span>
-                  <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Habits</span>
-                </div>
-                <div onClick={() => openModal('habits')} style={css('font-size:11px; font-weight:600; color:rgba(124,160,255,.9); cursor:pointer;')}>
-                  Open
-                </div>
-              </div>
-              <div style={css('display:flex; gap:3px; flex-shrink:0; padding-left:1px;')}>
-                {habitCols.map((c, i) => (
-                  <div key={i} style={css('flex:1; text-align:center; font-size:8px; font-weight:600; letter-spacing:.06em; color:rgba(255,255,255,.28);')}>
-                    {c}
-                  </div>
-                ))}
-              </div>
-              <div style={css('flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:10px;')}>
-                {habitRows.map((h) => (
-                  <div key={h.id} style={css('display:flex; flex-direction:column; gap:5px; flex-shrink:0;')}>
-                    <div style={css('display:flex; align-items:baseline; justify-content:space-between; gap:6px;')}>
-                      <span
-                        style={css(
-                          'font-size:clamp(10px,1.3vh,11.5px); font-weight:500; color:rgba(255,255,255,.72); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
-                        )}
-                      >
-                        {h.name}
-                      </span>
-                      <span style={css('font-size:9.5px; font-weight:600; color:rgba(255,255,255,.4); flex-shrink:0;')}>
-                        {h.streak > 0 ? h.streak + 'd' : '—'}
-                      </span>
-                    </div>
-                    <div style={css('display:flex; gap:3px;')}>
-                      {h.days.map((on, di) => (
-                        <div
-                          key={di}
-                          onClick={() =>
-                            set((st) => ({
-                              habits: st.habits.map((x) =>
-                                x.id === h.id ? { ...x, days: x.days.map((v, k) => (k === di ? !v : v)) } : x,
-                              ),
-                            }))
-                          }
-                          style={{
-                            flex: 1,
-                            height: 15,
-                            borderRadius: 4,
-                            cursor: 'pointer',
-                            background: on ? 'rgba(76,141,255,.75)' : 'rgba(255,255,255,.08)',
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ))}
-                {habitRows.length === 0 && (
-                  <div onClick={() => openModal('habits')} style={css('font-size:11.5px; color:rgba(255,255,255,.35); cursor:pointer;')}>
-                    No habits yet. Add one.
-                  </div>
-                )}
-              </div>
-            </div>
+            <TodoCard
+              s={s}
+              set={set}
+              todayIso={todayIso}
+              onToggle={toggleTask}
+              onDelete={(x) => withUndo('Task deleted', ['tasks'], (st) => ({ tasks: st.tasks.filter((y) => y.id !== x.id) }))}
+              onNew={newTask}
+              onEdit={editTask}
+            />
 
-            <div style={css('flex-shrink:0; display:flex; align-items:center; gap:10px;')}>
-              <Box
-                onClick={() => openModal('todo')}
-                title="To-do list"
-                sx="width:38px; height:38px; border-radius:50%; flex-shrink:0; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.12); box-shadow:0 6px 20px rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; font-size:15px; color:rgba(255,255,255,.7); cursor:pointer; font-family:'Material Symbols Rounded'; line-height:1;"
-                hover="background:rgba(255,255,255,.14); color:#fff"
-              >
-                checklist
-              </Box>
-              <div onClick={() => openModal('todo')} style={css('font-size:11px; font-weight:500; color:rgba(255,255,255,.4); cursor:pointer;')}>
-                {visibleTasks.length + (s.filter === 'done' ? ' done' : ' to do')}
-              </div>
-            </div>
           </div>
 
           {/* Boards */}
-          <div data-tour="boards" style={css('display:flex; flex-direction:column; gap:clamp(8px,1.1vh,13px); min-width:0; min-height:0;')}>
+          <div className="dashboard-boards" data-tour="boards" style={css('display:flex; flex-direction:column; gap:clamp(8px,1.1vh,13px); min-width:0; min-height:0;')}>
             <div style={css('display:flex; align-items:center; gap:12px; flex-shrink:0;')}>
               <span style={css('font-size:10.5px; font-weight:600; letter-spacing:.22em; color:rgba(255,255,255,.4);')}>BOARDS</span>
               <Box
                 onClick={() => openModal('board', { dBoardName: '', bmReturn: false })}
-                sx="display:flex; align-items:center; gap:6px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:11px; padding:6px 13px; font-size:12px; font-weight:600; color:rgba(255,255,255,.85); cursor:pointer;"
+                sx="display:flex; align-items:center; gap:6px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:11px; padding:6px 13px; font-size:12px; font-weight:600; color:rgba(255,255,255,.85); cursor:pointer; white-space:nowrap;"
                 hover="background:rgba(255,255,255,.13)"
               >
                 + Add board
@@ -1383,9 +1627,100 @@ export default function App() {
                 {pageBoards.length + ' boards · ' + bmCount + ' bookmarks'}
               </span>
             </div>
+            {orderedBoards.length === 0 ? (
+              <div style={css('flex:1; min-height:0; display:flex; align-items:center; justify-content:center; padding:8px;')}>
+                <div
+                  style={css(
+                    'width:100%; max-width:460px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px dashed rgba(255,255,255,.2); border-radius:18px; padding:clamp(20px,3vh,30px); display:flex; flex-direction:column; align-items:center; gap:12px; text-align:center;',
+                  )}
+                >
+                  <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:34px; color:rgba(255,255,255,.28);")}>
+                    bookmarks
+                  </span>
+                  <div style={css('font-size:15px; font-weight:700; color:rgba(255,255,255,.92);')}>
+                    {s.pages.length > 1 ? 'No boards on this page yet' : 'Start with your first board'}
+                  </div>
+                  <div style={css('font-size:12px; color:rgba(255,255,255,.45); line-height:1.7; max-width:360px;')}>
+                    Boards are folders of links. They sync both ways with your Chrome bookmarks, so anything you add
+                    here shows up in the bookmark bar too.
+                  </div>
+                  <div style={css('display:flex; gap:9px; flex-wrap:wrap; justify-content:center; margin-top:2px;')}>
+                    <Box
+                      onClick={() => openModal('board', { dBoardName: '', bmReturn: false })}
+                      sx="background:rgba(76,141,255,.95); border-radius:11px; padding:10px 18px; font-size:12.5px; font-weight:600; cursor:pointer;"
+                      hover="background:rgba(96,157,255,1)"
+                    >
+                      + Create a board
+                    </Box>
+                    <Box
+                      onClick={() => openModal('import', { importPreview: false, importError: '' })}
+                      sx="border:1px solid rgba(255,255,255,.18); border-radius:11px; padding:10px 18px; font-size:12.5px; font-weight:600; color:rgba(255,255,255,.8); cursor:pointer;"
+                      hover="background:rgba(255,255,255,.08)"
+                    >
+                      Import bookmarks
+                    </Box>
+                  </div>
+
+                  {s.topSites.length > 0 && (
+                    <div style={css('width:100%; border-top:1px solid rgba(255,255,255,.09); margin-top:6px; padding-top:14px; display:flex; flex-direction:column; gap:10px;')}>
+                      <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.4);')}>
+                        OR PICK FROM YOUR MOST-VISITED
+                      </div>
+                      <div style={css('display:flex; flex-wrap:wrap; gap:6px; justify-content:center;')}>
+                        {s.topSites.slice(0, 8).map((site) => {
+                          const on = pickedSites.includes(site.url)
+                          return (
+                            <Box
+                              key={site.url}
+                              onClick={() =>
+                                setPickedSites((prev) =>
+                                  prev.includes(site.url) ? prev.filter((u) => u !== site.url) : [...prev, site.url],
+                                )
+                              }
+                              sx={
+                                'display:flex; align-items:center; gap:6px; border-radius:9px; padding:6px 10px; font-size:11.5px; font-weight:500; cursor:pointer; max-width:150px; border:1px solid ' +
+                                (on ? 'rgba(76,141,255,.7)' : 'rgba(255,255,255,.12)') +
+                                '; background:' +
+                                (on ? 'rgba(76,141,255,.18)' : 'rgba(255,255,255,.04)') +
+                                '; color:' +
+                                (on ? '#fff' : 'rgba(255,255,255,.7)') +
+                                ';'
+                              }
+                              hover="background:rgba(255,255,255,.1)"
+                            >
+                              <Favicon
+                                url={site.url}
+                                title={site.title}
+                                sx="width:15px;height:15px;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;background:rgba(255,255,255,.14);color:rgba(255,255,255,.85);"
+                              />
+                              <span style={css('min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;')}>
+                                {site.title || site.url}
+                              </span>
+                            </Box>
+                          )
+                        })}
+                      </div>
+                      <Box
+                        onClick={() => void addPickedSites()}
+                        sx={
+                          'align-self:center; border-radius:10px; padding:9px 16px; font-size:12px; font-weight:600; cursor:pointer; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.14); color:rgba(255,255,255,' +
+                          (pickedSites.length ? '.92' : '.35') +
+                          ');'
+                        }
+                        hover={pickedSites.length ? 'background:rgba(255,255,255,.15)' : ''}
+                      >
+                        {pickedSites.length
+                          ? `Add ${pickedSites.length} to a "Quick links" board`
+                          : 'Select a few sites to add'}
+                      </Box>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
             <div
               style={css(
-                'flex:1; min-height:0; overflow-y:auto; padding-right:6px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:clamp(12px,1.3vw,20px); align-content:start;',
+                'flex:1; min-height:0; overflow-y:auto; overflow-x:auto; padding-right:6px; display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:clamp(12px,1.3vw,20px); align-content:start;',
               )}
             >
               {orderedBoards.map((b, i) => {
@@ -1407,7 +1742,7 @@ export default function App() {
                   }}
                   style={{
                     ...css(
-                      'height:clamp(188px,25vh,248px); background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(11px,1.5vh,15px); display:flex; flex-direction:column; gap:8px; min-width:0;',
+                      'height:clamp(178px,23vh,228px); background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(11px,1.5vh,15px); display:flex; flex-direction:column; gap:8px; min-width:0;',
                     ),
                     opacity: dragging ? 0.45 : 1,
                     outline: over ? '2px dashed rgba(130,175,255,.8)' : 'none',
@@ -1543,10 +1878,11 @@ export default function App() {
                 )
               })}
             </div>
+            )}
           </div>
 
           {/* Right rail */}
-          <div style={css('display:flex; flex-direction:column; gap:clamp(10px,1.2vh,16px); min-height:0;')}>
+          <div className="dashboard-right" style={css('display:flex; flex-direction:column; gap:clamp(10px,1.2vh,16px); min-height:0;')}>
             <div
               data-tour="calendar"
               style={css(
@@ -1564,13 +1900,23 @@ export default function App() {
                 <div style={css('font-size:clamp(11.5px,1.5vh,13.5px); font-weight:600;')}>
                   {base.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
                 </div>
-                <Box
-                  onClick={() => set({ monthOffset: s.monthOffset + 1 })}
-                  sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.5); cursor:pointer;"
-                  hover="background:rgba(255,255,255,.1); color:#fff"
-                >
-                  <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px;")}>chevron_right</span>
-                </Box>
+                <div style={css('display:flex; align-items:center; gap:2px;')}>
+                  <Box
+                    onClick={() => set({ monthOffset: s.monthOffset + 1 })}
+                    sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.5); cursor:pointer;"
+                    hover="background:rgba(255,255,255,.1); color:#fff"
+                  >
+                    <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px;")}>chevron_right</span>
+                  </Box>
+                  <Box
+                    onClick={() => openModal('habits')}
+                    title="Habit tracker"
+                    sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.42); cursor:pointer;"
+                    hover="background:rgba(255,255,255,.1); color:rgba(124,160,255,.95)"
+                  >
+                    <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:15px;")}>repeat</span>
+                  </Box>
+                </div>
               </div>
               <div style={css('display:grid; grid-template-columns:repeat(7,1fr); gap:2px;')}>
                 {['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'].map((w) => (
@@ -1583,7 +1929,7 @@ export default function App() {
                     key={i}
                     onClick={
                       d.dayIso
-                        ? () => set({ dateOpen: d.dayIso, dnFormOpen: false, dnEditing: null, dnTitle: '', dnDesc: '', dnCat: 'Personal' })
+                        ? () => set({ dateOpen: d.dayIso, dnOpen: null, dnFormOpen: false, dnEditing: null, dnTitle: '', dnDesc: '', dnCat: 'Personal' })
                         : undefined
                     }
                     style={{
@@ -1600,149 +1946,121 @@ export default function App() {
                     }}
                   >
                     {d.label}
-                    {d.has && (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          left: '50%',
-                          bottom: 2,
-                          transform: 'translateX(-50%)',
-                          width: 3,
-                          height: 3,
-                          borderRadius: '50%',
-                          background: d.today ? '#fff' : 'rgba(124,160,255,.95)',
-                        }}
-                      />
+                    {(['habit', 'task', 'note'] as const).some((k) => d.marks[k]) && (
+                      <div style={css('position:absolute; left:0; right:0; bottom:2px; display:flex; gap:2px; justify-content:center;')}>
+                        {(['habit', 'task', 'note'] as const)
+                          .filter((k) => d.marks[k])
+                          .map((k) => (
+                            <span
+                              key={k}
+                              style={{
+                                width: 3,
+                                height: 3,
+                                borderRadius: '50%',
+                                background: d.today ? '#fff' : MARK_COLORS[k],
+                              }}
+                            />
+                          ))}
+                      </div>
                     )}
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Upcoming tasks */}
             <div
-              data-tour="tasks"
+              aria-label="Pomodoro timer"
               style={css(
-                'flex:1; min-height:0; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); display:flex; flex-direction:column;',
+                'flex:1; min-height:220px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(12px,1.5vh,16px); display:flex; flex-direction:column; gap:12px;',
               )}
             >
-              <div style={css('padding:clamp(11px,1.5vh,15px) clamp(12px,1.5vh,16px) 10px; display:flex; align-items:center; gap:8px; flex-shrink:0;')}>
-                <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(255,255,255,.5);")}>schedule</span>
-                <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Upcoming</span>
-                <span style={css('margin-left:auto; font-size:11px; font-weight:600; color:rgba(255,255,255,.4);')}>
-                  {visibleTasks.length + (s.filter === 'done' ? ' done' : ' open')}
+              <div style={css('display:flex; align-items:center; gap:8px; flex-shrink:0;')}>
+                <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(255,255,255,.5);")}>timer</span>
+                <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Pomodoro</span>
+                <span
+                  style={css(
+                    'margin-left:auto; font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:' +
+                      (pomodoro.mode === 'work' ? 'rgba(130,175,255,.95)' : 'rgba(93,202,165,.95)') +
+                      ';',
+                  )}
+                >
+                  {pomodoro.mode}
                 </span>
+                <Box
+                  onClick={() => setPomodoroSettingsOpen((open) => !open)}
+                  aria-label="Pomodoro settings"
+                  title="Pomodoro settings"
+                  sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-family:'Material Symbols Rounded'; line-height:1; font-size:15px; color:rgba(255,255,255,.4); cursor:pointer;"
+                  hover="background:rgba(255,255,255,.1); color:#fff"
+                >
+                  tune
+                </Box>
               </div>
-              <div style={css('display:flex; gap:5px; padding:0 clamp(12px,1.5vh,16px) 11px; flex-wrap:wrap; flex-shrink:0;')}>
-                {(['all', 'today', 'upcoming', 'done'] as const).map((key) => (
+
+              <div style={css('display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; flex:1; min-height:0;')}>
+                <div style={css('font-size:clamp(30px,4.6vh,46px); font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:.04em; color:rgba(255,255,255,.94);')}>
+                  {formatPomodoro(pomodoro.secondsLeft)}
+                </div>
+                <div style={css('width:100%; height:5px; border-radius:999px; overflow:hidden; background:rgba(255,255,255,.09);')}>
                   <div
-                    key={key}
-                    onClick={() => set({ filter: key })}
                     style={{
-                      fontSize: 9.5,
-                      fontWeight: 600,
-                      letterSpacing: '.1em',
-                      textTransform: 'uppercase',
-                      padding: '5px 10px',
-                      borderRadius: 8,
-                      cursor: 'pointer',
-                      background: s.filter === key ? 'rgba(255,255,255,.14)' : 'transparent',
-                      color: s.filter === key ? '#fff' : 'rgba(255,255,255,.42)',
+                      width:
+                        `${Math.max(0, Math.min(100, (pomodoro.secondsLeft / ((pomodoro.mode === 'work' ? pomodoro.workMinutes : pomodoro.breakMinutes) * 60)) * 100))}%`,
+                      height: '100%',
+                      borderRadius: 999,
+                      background: pomodoro.mode === 'work' ? '#4c8dff' : '#5dcaA5',
+                      transition: 'width .2s linear',
                     }}
-                  >
-                    {key[0].toUpperCase() + key.slice(1)}
-                  </div>
-                ))}
+                  />
+                </div>
               </div>
-              <div style={css('flex:1; min-height:0; overflow-y:auto; border-top:1px solid rgba(255,255,255,.07); padding:4px;')}>
-                {visibleTasks.map((t) => {
-                  const p = prioMeta[t.priority] || prioMeta.medium
-                  const d = new Date(t.due + 'T00:00')
-                  return (
-                    <Box key={t.id} sx="display:flex; align-items:flex-start; gap:10px; padding:9px 10px; border-radius:11px;" hover="background:rgba(255,255,255,.06)">
-                      <div
-                        onClick={() =>
-                          set((st) => ({ tasks: st.tasks.map((x) => (x.id === t.id ? { ...x, completed: !x.completed } : x)) }))
-                        }
-                        style={{
-                          width: 16,
-                          height: 16,
-                          borderRadius: 5,
-                          flexShrink: 0,
-                          cursor: 'pointer',
-                          marginTop: 1,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontSize: 13,
-                          color: '#fff',
-                          fontFamily: 'Material Symbols Rounded',
-                          lineHeight: 1,
-                          border: '1.5px solid ' + (t.completed ? '#4c8dff' : 'rgba(255,255,255,.32)'),
-                          background: t.completed ? '#4c8dff' : 'transparent',
-                        }}
-                      >
-                        {t.completed ? 'check' : ''}
-                      </div>
-                      <div style={css('flex:1; min-width:0;')}>
-                        <div
-                          style={{
-                            fontSize: 'clamp(11.5px,1.5vh,13px)',
-                            fontWeight: 500,
-                            lineHeight: 1.4,
-                            color: t.completed ? 'rgba(255,255,255,.35)' : 'rgba(255,255,255,.9)',
-                            textDecoration: t.completed ? 'line-through' : 'none',
-                          }}
-                        >
-                          {t.title}
-                        </div>
-                        <div style={css('display:flex; gap:6px; margin-top:5px; flex-wrap:wrap; align-items:center;')}>
-                          <span style={css('font-size:9.5px; font-weight:500; color:rgba(255,255,255,.4); white-space:nowrap;')}>
-                            {d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) + (t.time ? ' · ' + t.time : '')}
-                          </span>
-                          <span
-                            style={{
-                              fontSize: 9.5,
-                              fontWeight: 600,
-                              padding: '2px 7px',
-                              borderRadius: 5,
-                              whiteSpace: 'nowrap',
-                              background: p.bg,
-                              color: p.fg,
-                            }}
-                          >
-                            {t.priority}
-                          </span>
-                        </div>
-                      </div>
-                      <Box
-                        onClick={() => withUndo('Task deleted', ['tasks'], (st) => ({ tasks: st.tasks.filter((x) => x.id !== t.id) }))}
-                        sx="font-size:11px; color:rgba(255,255,255,.22); cursor:pointer; padding-top:2px;"
-                        hover="color:rgba(255,140,130,.95)"
-                      >
-                        <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:14px;")}>close</span>
-                      </Box>
-                    </Box>
-                  )
-                })}
-                {visibleTasks.length === 0 && (
-                  <div style={css('padding:30px 16px; text-align:center; font-size:12px; color:rgba(255,255,255,.32);')}>{emptyTaskLine}</div>
-                )}
+
+              {pomodoroSettingsOpen && (
+                <div style={css('display:grid; grid-template-columns:1fr 1fr; gap:8px; flex-shrink:0;')}>
+                  {(['workMinutes', 'breakMinutes'] as const).map((key) => (
+                    <label key={key} style={css('display:flex; flex-direction:column; gap:5px; font-size:9.5px; font-weight:600; color:rgba(255,255,255,.45); text-transform:uppercase; letter-spacing:.08em;')}>
+                      {key === 'workMinutes' ? 'Work' : 'Break'}
+                      <input
+                        type="number"
+                        min="1"
+                        max="90"
+                        value={pomodoro[key]}
+                        aria-label={`${key === 'workMinutes' ? 'Work' : 'Break'} minutes`}
+                        onChange={(event) => updatePomodoroDuration(key, Number(event.target.value))}
+                        style={css('width:100%; padding:7px 8px; font-size:12px; font-weight:600; color:rgba(255,255,255,.85);')}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              <div style={css('display:flex; align-items:center; gap:8px; flex-shrink:0;')}>
+                <Box
+                  onClick={resetPomodoro}
+                  aria-label="Reset Pomodoro"
+                  title="Reset timer"
+                  sx="width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-family:'Material Symbols Rounded'; line-height:1; font-size:18px; color:rgba(255,255,255,.55); cursor:pointer; border:1px solid rgba(255,255,255,.12);"
+                  hover="background:rgba(255,255,255,.1); color:#fff"
+                >
+                  restart_alt
+                </Box>
+                <Box
+                  onClick={() => setPomodoro((current) => ({ ...current, running: !current.running }))}
+                  sx="flex:1; border-radius:10px; padding:9px 12px; text-align:center; font-size:12px; font-weight:700; color:#fff; cursor:pointer; background:rgba(76,141,255,.95);"
+                  hover="background:rgba(96,157,255,1)"
+                >
+                  {pomodoro.running ? 'Pause' : 'Start'}
+                </Box>
               </div>
-              <Box
-                onClick={() => openModal('task', { dTitle: '', dDue: todayIso, dTime: '', dPrio: 'medium', dRemind: 'none' })}
-                sx="margin:clamp(9px,1.2vh,12px); background:rgba(76,141,255,.95); border-radius:12px; text-align:center; padding:10px; font-size:12.5px; font-weight:600; color:#fff; cursor:pointer; flex-shrink:0;"
-                hover="background:rgba(96,157,255,1)"
-              >
-                + New task
-              </Box>
             </div>
+
           </div>
         </div>
       </div>
 
       {/* Utility toolbar */}
       <div
+        className="utility-toolbar"
         style={css(
           'position:absolute; right:clamp(10px,1vw,18px); top:50%; transform:translateY(-50%); display:flex; flex-direction:column; gap:clamp(3px,.5vh,6px); z-index:5;',
         )}
@@ -1763,7 +2081,9 @@ export default function App() {
       {/* Date notes drawer */}
       {s.dateOpen && (
         <div
-          onClick={() => set({ dateOpen: null, dnFormOpen: false, dnEditing: null })}
+          onClick={() => {
+            set({ dateOpen: null, dnOpen: null, dnFormOpen: false, dnEditing: null })
+          }}
           style={css('position:absolute; inset:0; background:rgba(6,9,14,.5); z-index:28; display:flex; justify-content:flex-end;')}
         >
           <div
@@ -1778,13 +2098,15 @@ export default function App() {
               )}
             >
               <div style={css('display:flex; flex-direction:column; gap:5px;')}>
-                <span style={css('font-size:10px; font-weight:600; letter-spacing:.2em; color:rgba(255,255,255,.42);')}>DATE NOTES</span>
+                <span style={css('font-size:10px; font-weight:600; letter-spacing:.2em; color:rgba(255,255,255,.42);')}>THIS DAY</span>
                 <span style={css('font-size:19px; font-weight:700;')}>
                   {new Date(s.dateOpen + 'T00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
                 </span>
               </div>
               <Box
-                onClick={() => set({ dateOpen: null, dnFormOpen: false, dnEditing: null })}
+                onClick={() => {
+                  set({ dateOpen: null, dnOpen: null, dnFormOpen: false, dnEditing: null })
+                }}
                 sx="width:28px; height:28px; border-radius:9px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.5); cursor:pointer;"
                 hover="background:rgba(255,255,255,.1); color:#fff"
               >
@@ -1795,74 +2117,55 @@ export default function App() {
             <div style={css('flex:1; min-height:0; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:14px;')}>
               {s.dnFormOpen && (
                 <div
+                  ref={journalEditorRef}
                   style={css(
-                    'background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.16); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;',
+                    'position:relative; flex:1; min-height:0; display:flex; flex-direction:column; gap:12px;',
                   )}
                 >
-                  <div style={css('display:flex; flex-direction:column; gap:7px;')}>
-                    <label style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.45);')}>TITLE</label>
-                    <input value={s.dnTitle} onChange={(e) => set({ dnTitle: e.target.value })} placeholder="Note title" style={css('padding:11px 13px; font-size:13.5px;')} />
-                  </div>
-                  <div style={css('display:flex; flex-direction:column; gap:7px;')}>
-                    <label style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.45);')}>DESCRIPTION</label>
+                  <input
+                    value={s.dnTitle}
+                    onChange={(e) => set({ dnTitle: e.target.value })}
+                    placeholder="Title"
+                    aria-label="Journal title"
+                    style={css('flex-shrink:0; padding:3px 0 10px; border:0; border-bottom:1px solid rgba(255,255,255,.14); border-radius:0; background:transparent; font-size:20px; font-weight:700; color:rgba(255,255,255,.95);')}
+                  />
+
+                  <div style={css('position:relative; flex:1; min-height:220px;')}>
                     <textarea
+                      ref={journalRef}
                       value={s.dnDesc}
                       onChange={(e) => set({ dnDesc: e.target.value })}
-                      placeholder="Write details..."
-                      style={css('padding:12px 13px; min-height:110px; resize:vertical; font-size:13px; line-height:1.65;')}
+                      aria-label="Journal text"
+                      placeholder="Start writing..."
+                      style={css('width:100%; height:100%; min-height:220px; resize:none; outline:none; border:0; border-radius:0; padding:0; background:transparent; font-size:14px; line-height:1.75; color:rgba(255,255,255,.86);')}
                     />
                   </div>
-                  <div style={css('display:flex; flex-direction:column; gap:9px;')}>
-                    <label style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.45);')}>CATEGORY</label>
-                    <div style={css('display:flex; gap:8px; flex-wrap:wrap;')}>
-                      {CATS.map((c) => (
-                        <div
-                          key={c.name}
-                          onClick={() => set({ dnCat: c.name })}
-                          style={{
-                            fontSize: 12.5,
-                            fontWeight: 500,
-                            padding: '8px 15px',
-                            borderRadius: 999,
-                            cursor: 'pointer',
-                            background: c.color + '22',
-                            color: s.dnCat === c.name ? '#fff' : 'rgba(255,255,255,.72)',
-                            border: '1px solid ' + (s.dnCat === c.name ? 'rgba(255,255,255,.85)' : 'transparent'),
-                          }}
-                        >
-                          {c.name}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={css('display:flex; align-items:center; justify-content:flex-end; gap:10px;')}>
-                    <div onClick={() => set({ dnFormOpen: false, dnEditing: null })} style={css('padding:10px 14px; font-size:13px; font-weight:500; color:rgba(255,255,255,.6); cursor:pointer;')}>
+
+                  <div style={css('display:flex; align-items:center; gap:10px; flex-shrink:0; padding-top:10px; border-top:1px solid rgba(255,255,255,.08);')}>
+                    <span style={css('flex:1; min-width:0; font-size:10.5px; color:rgba(255,255,255,.32);')}>{s.dnEditing ? 'Last modified ' + stamp(dayList.find((n) => n.id === s.dnEditing)?.updated || Date.now()) : 'Last modified when saved'}</span>
+                    <Box onClick={() => { void store.remove(JOURNAL_DRAFT_KEY); set({ dnFormOpen: false, dnEditing: null }) }} sx="padding:9px 12px; font-size:12px; font-weight:500; color:rgba(255,255,255,.58); cursor:pointer;" hover="color:#fff">
                       Cancel
-                    </div>
+                    </Box>
                     <Box
                       onClick={() => {
-                        if (!s.dnTitle.trim()) return
                         set((st) => {
                           const key = st.dateOpen!
                           const now = Date.now()
                           const list = (st.dateNotes[key] || []).slice()
+                          const desc = plainJournalText(st.dnDesc)
+                          const fallbackTitle = journalTitleFromBody(desc)
+                          const title = st.dnTitle.trim() || fallbackTitle || 'Untitled journal'
                           if (st.dnEditing) {
                             const idx = list.findIndex((x) => x.id === st.dnEditing)
-                            if (idx > -1) list[idx] = { ...list[idx], title: st.dnTitle.trim(), desc: st.dnDesc, category: st.dnCat, updated: now }
+                            if (idx > -1) list[idx] = { ...list[idx], title, desc, category: st.dnCat, updated: now }
                           } else {
-                            list.push({ id: now, title: st.dnTitle.trim(), desc: st.dnDesc, category: st.dnCat, created: now, updated: now })
+                            list.push({ id: now, title, desc, category: st.dnCat, created: now, updated: now })
                           }
-                          return {
-                            dateNotes: { ...st.dateNotes, [key]: list },
-                            dnFormOpen: false,
-                            dnEditing: null,
-                            dnTitle: '',
-                            dnDesc: '',
-                            dnCat: 'Personal',
-                          }
+                          return { dateNotes: { ...st.dateNotes, [key]: list }, dnFormOpen: false, dnEditing: null, dnTitle: '', dnDesc: '', dnCat: 'Personal' }
                         })
+                        void store.remove(JOURNAL_DRAFT_KEY)
                       }}
-                      sx="background:rgba(76,141,255,.95); border-radius:11px; padding:11px 22px; font-size:13px; font-weight:600; cursor:pointer;"
+                      sx="background:rgba(76,141,255,.95); border-radius:10px; padding:9px 16px; font-size:12px; font-weight:600; cursor:pointer;"
                       hover="background:rgba(96,157,255,1)"
                     >
                       {s.dnEditing ? 'Save note' : 'Add note'}
@@ -1871,29 +2174,39 @@ export default function App() {
                 </div>
               )}
 
-              {dayList.map((n) => (
-                <div
-                  key={n.id}
-                  style={css('background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.16); border-radius:14px; padding:16px 17px; display:flex; flex-direction:column; gap:11px;')}
-                >
+              {!s.dnFormOpen && openNote && (
+                <div style={css('display:flex; flex-direction:column; gap:14px;')}>
+                  <Box
+                    onClick={() => set({ dnOpen: null })}
+                    sx="display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; color:rgba(255,255,255,.55); cursor:pointer; align-self:flex-start;"
+                    hover="color:#fff"
+                  >
+                    <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:16px;")}>arrow_back</span>
+                    Back
+                  </Box>
                   <div style={css('display:flex; align-items:flex-start; gap:10px;')}>
-                    <div style={{ width: 9, height: 9, borderRadius: '50%', marginTop: 5, flexShrink: 0, background: catColor(n.category) }} />
+                    <div style={{ width: 9, height: 9, borderRadius: '50%', marginTop: 7, flexShrink: 0, background: catColor(openNote.category) }} />
                     <div style={css('min-width:0; flex:1;')}>
-                      <div style={css('font-size:14px; font-weight:600; color:rgba(255,255,255,.95);')}>{n.title}</div>
-                      <div style={css('font-size:11px; color:rgba(255,255,255,.45); margin-top:2px;')}>{n.category}</div>
+                      <div style={css('font-size:17px; font-weight:600; color:rgba(255,255,255,.96); line-height:1.35;')}>{openNote.title}</div>
+                      <div style={css('font-size:11px; color:rgba(255,255,255,.45); margin-top:3px;')}>{openNote.category}</div>
                     </div>
+                    <span style={css('font-size:11px; font-weight:600; color:rgba(255,255,255,.34); flex-shrink:0; padding-top:3px;')}>
+                      {clock(openNote.created)}
+                    </span>
                   </div>
-                  {n.desc && n.desc.trim() && (
-                    <div style={css('font-size:13px; line-height:1.65; color:rgba(255,255,255,.75); border-top:1px solid rgba(255,255,255,.08); padding-top:11px; white-space:pre-wrap;')}>
-                      {n.desc}
-                    </div>
+                  {openNote.desc && openNote.desc.trim() ? (
+                    <div style={css('font-size:13.5px; line-height:1.75; color:rgba(255,255,255,.8); white-space:pre-wrap;')}>{plainJournalText(openNote.desc)}</div>
+                  ) : (
+                    <div style={css('font-size:13px; color:rgba(255,255,255,.32); font-style:italic;')}>No details written.</div>
                   )}
-                  <div style={css('font-size:10.5px; color:rgba(255,255,255,.32);')}>
-                    {'Created ' + stamp(n.created) + ' · Updated ' + stamp(n.updated)}
+                  <div style={css('font-size:10.5px; color:rgba(255,255,255,.28); border-top:1px solid rgba(255,255,255,.08); padding-top:11px;')}>
+                    {'Created ' + stamp(openNote.created) + ' · Updated ' + stamp(openNote.updated)}
                   </div>
-                  <div style={css('display:flex; gap:18px; padding-top:2px;')}>
+                  <div style={css('display:flex; gap:18px;')}>
                     <Box
-                      onClick={() => set({ dnFormOpen: true, dnEditing: n.id, dnTitle: n.title, dnDesc: n.desc, dnCat: n.category })}
+                      onClick={() =>
+                        set({ dnFormOpen: true, dnEditing: openNote.id, dnTitle: openNote.title, dnDesc: openNote.desc, dnCat: openNote.category })
+                      }
                       sx="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:500; color:rgba(255,255,255,.7); cursor:pointer;"
                       hover="color:#fff"
                     >
@@ -1901,18 +2214,12 @@ export default function App() {
                     </Box>
                     <Box
                       onClick={() =>
-                        set({ modal: 'task', dTitle: n.title, dDue: s.dateOpen!, dTime: '', dPrio: 'medium', dRemind: '15', dateOpen: null })
-                      }
-                      sx="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:500; color:rgba(255,255,255,.7); cursor:pointer;"
-                      hover="color:#fff"
-                    >
-                      <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:15px;")}>notifications</span> Reminder
-                    </Box>
-                    <Box
-                      onClick={() =>
                         withUndo('Note deleted', ['dateNotes'], (st) => {
                           const key = st.dateOpen!
-                          return { dateNotes: { ...st.dateNotes, [key]: (st.dateNotes[key] || []).filter((x) => x.id !== n.id) } }
+                          return {
+                            dnOpen: null,
+                            dateNotes: { ...st.dateNotes, [key]: (st.dateNotes[key] || []).filter((x) => x.id !== openNote.id) },
+                          }
                         })
                       }
                       sx="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:500; color:rgba(248,113,113,.9); cursor:pointer;"
@@ -1922,17 +2229,128 @@ export default function App() {
                     </Box>
                   </div>
                 </div>
-              ))}
+              )}
 
-              {dayList.length === 0 && !s.dnFormOpen && (
-                <div style={css('border:1px dashed rgba(255,255,255,.16); border-radius:14px; padding:44px 20px; text-align:center; font-size:13.5px; color:rgba(255,255,255,.4);')}>
-                  No notes or reminders for this day yet.
-                </div>
+              {!s.dnFormOpen && !openNote && (
+                <>
+                  {s.habits.length > 0 && (
+                    <div style={css('display:flex; flex-direction:column; gap:9px;')}>
+                      <div style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.42);')}>HABITS</div>
+                      {s.habits.map((h) => {
+                        const on = h.done.includes(s.dateOpen!)
+                        return (
+                          <div key={h.id} style={css('display:flex; align-items:center; gap:11px;')}>
+                            <Box
+                              onClick={() => toggleHabitDay(h.id, s.dateOpen!)}
+                              sx={
+                                "width:19px; height:19px; border-radius:6px; flex-shrink:0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-family:'Material Symbols Rounded'; line-height:1; font-size:13px; " +
+                                (on
+                                  ? 'background:rgba(29,158,117,.95); border:1px solid rgba(29,158,117,.95); color:#fff;'
+                                  : 'background:transparent; border:1.5px solid rgba(255,255,255,.26); color:transparent;')
+                              }
+                              hover={on ? 'background:rgba(29,158,117,1)' : 'border-color:rgba(255,255,255,.5)'}
+                            >
+                              check
+                            </Box>
+                            <span
+                              style={css(
+                                'font-size:13px; ' +
+                                  (on ? 'color:rgba(255,255,255,.42); text-decoration:line-through;' : 'color:rgba(255,255,255,.86);'),
+                              )}
+                            >
+                              {h.name}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {dayTasks.length > 0 && (
+                    <div style={css('display:flex; flex-direction:column; gap:9px;')}>
+                      <div style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.42);')}>TASKS DUE</div>
+                      {dayTasks.map((tk) => (
+                        <div key={tk.id} style={css('display:flex; align-items:center; gap:11px;')}>
+                          <Box
+                            onClick={() => toggleTask(tk.id)}
+                            sx={
+                              "width:19px; height:19px; border-radius:6px; flex-shrink:0; display:flex; align-items:center; justify-content:center; cursor:pointer; font-family:'Material Symbols Rounded'; line-height:1; font-size:13px; " +
+                              (tk.completed
+                                ? 'background:rgba(76,141,255,.95); border:1px solid rgba(76,141,255,.95); color:#fff;'
+                                : 'background:transparent; border:1.5px solid rgba(255,255,255,.26); color:transparent;')
+                            }
+                            hover={tk.completed ? 'background:rgba(76,141,255,1)' : 'border-color:rgba(255,255,255,.5)'}
+                          >
+                            check
+                          </Box>
+                          <span
+                            style={css(
+                              'flex:1; min-width:0; font-size:13px; ' +
+                                (tk.completed
+                                  ? 'color:rgba(255,255,255,.42); text-decoration:line-through;'
+                                  : 'color:rgba(255,255,255,.86);'),
+                            )}
+                          >
+                            {tk.title}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 9.5,
+                              fontWeight: 600,
+                              padding: '2px 8px',
+                              borderRadius: 999,
+                              flexShrink: 0,
+                              background: prioMeta[tk.priority].bg,
+                              color: prioMeta[tk.priority].fg,
+                            }}
+                          >
+                            {tk.priority}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {dayList.length > 0 && (
+                    <div style={css('display:flex; flex-direction:column; gap:7px;')}>
+                      <div style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.42);')}>JOURNAL</div>
+                      {dayList.map((n) => (
+                        <Box
+                          key={n.id}
+                          onClick={() => set({ dnOpen: null, dnFormOpen: true, dnEditing: n.id, dnTitle: n.title, dnDesc: n.desc, dnCat: n.category })}
+                          role="button"
+                          aria-label={`Open journal note ${n.title}`}
+                          sx="display:flex; align-items:center; gap:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.12); border-radius:11px; padding:11px 13px; cursor:pointer;"
+                          hover="background:rgba(255,255,255,.09); border-color:rgba(255,255,255,.22)"
+                        >
+                          <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: catColor(n.category) }} />
+                          <span
+                            style={css(
+                              'flex:1; min-width:0; font-size:13px; font-weight:500; color:rgba(255,255,255,.9); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
+                            )}
+                          >
+                            {n.title}
+                          </span>
+                          <span style={css('font-size:10.5px; font-weight:600; color:rgba(255,255,255,.3); flex-shrink:0;')}>{clock(n.created)}</span>
+                        </Box>
+                      ))}
+                    </div>
+                  )}
+
+                  {dayList.length === 0 && dayTasks.length === 0 && s.habits.length === 0 && (
+                    <div style={css('border:1px dashed rgba(255,255,255,.16); border-radius:14px; padding:44px 20px; text-align:center; font-size:13.5px; color:rgba(255,255,255,.4);')}>
+                      Nothing for this day yet.
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
+            {!s.dnFormOpen && !openNote && (
             <div style={css('padding:16px 22px 20px; border-top:1px solid rgba(255,255,255,.08); flex-shrink:0;')}>
               <Box
+                role="button"
+                aria-label="Add journal note"
                 onClick={() => set({ dnFormOpen: true, dnEditing: null, dnTitle: '', dnDesc: '', dnCat: 'Personal' })}
                 sx="background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:14px; text-align:center; font-size:13.5px; font-weight:600; color:rgba(255,255,255,.9); cursor:pointer;"
                 hover="background:rgba(255,255,255,.12)"
@@ -1940,6 +2358,7 @@ export default function App() {
                 + Add note
               </Box>
             </div>
+            )}
           </div>
         </div>
       )}
@@ -1985,7 +2404,11 @@ export default function App() {
           >
             <div style={css('display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;')}>
               <div style={css('font-size:16px; font-weight:700;')}>
-                {s.modal === 'bookmark' && s.dBmId ? 'Edit bookmark' : titles[s.modal] || ''}
+                {s.modal === 'bookmark' && s.dBmId
+                  ? 'Edit bookmark'
+                  : s.modal === 'task' && s.dTaskId
+                    ? 'Edit task'
+                    : titles[s.modal] || ''}
               </div>
               <Box
                 onClick={closeModal}
@@ -1996,6 +2419,13 @@ export default function App() {
               </Box>
             </div>
 
+            <Suspense
+              fallback={
+                <div style={css('padding:30px 4px; text-align:center; font-size:12.5px; color:rgba(255,255,255,.4);')}>
+                  Loading…
+                </div>
+              }
+            >
             {s.modal === 'note' && (
               <div style={css('display:flex; flex-direction:column; gap:14px;')}>
                 <input
@@ -2035,6 +2465,7 @@ export default function App() {
                 <div style={css('display:flex; align-items:center; gap:12px;')}>
                   <select value={s.filter} onChange={(e) => set({ filter: e.target.value as State['filter'] })} style={css('padding:9px 12px; font-size:12.5px; font-weight:600;')}>
                     <option value="today">Today's tasks</option>
+                    <option value="backlog">Backlog</option>
                     <option value="upcoming">Upcoming</option>
                     <option value="done">Completed</option>
                     <option value="all">All open</option>
@@ -2043,7 +2474,7 @@ export default function App() {
                     {visibleTasks.length + (s.filter === 'done' ? ' done' : ' open')}
                   </span>
                   <div
-                    onClick={() => openModal('task', { dTitle: '', dDue: todayIso, dTime: '', dPrio: 'medium', dRemind: 'none' })}
+                    onClick={newTask}
                     style={css('margin-left:auto; background:rgba(76,141,255,.95); border-radius:10px; padding:9px 16px; font-size:12px; font-weight:600; cursor:pointer;')}
                   >
                     + New task
@@ -2056,7 +2487,7 @@ export default function App() {
                     return (
                       <Box key={t.id} sx="display:flex; align-items:flex-start; gap:12px; padding:12px 12px; border-radius:12px; background:rgba(255,255,255,.04);" hover="background:rgba(255,255,255,.08)">
                         <div
-                          onClick={() => set((st) => ({ tasks: st.tasks.map((x) => (x.id === t.id ? { ...x, completed: !x.completed } : x)) }))}
+                          onClick={() => toggleTask(t.id)}
                           style={{
                             width: 16,
                             height: 16,
@@ -2096,6 +2527,7 @@ export default function App() {
                             <span style={{ fontSize: 9.5, fontWeight: 600, padding: '2px 7px', borderRadius: 5, whiteSpace: 'nowrap', background: p.bg, color: p.fg }}>
                               {t.priority}
                             </span>
+                            <ReminderChip remind={t.remind} />
                           </div>
                         </div>
                         <Box
@@ -2166,6 +2598,13 @@ export default function App() {
                     <option value="60">1 hour before</option>
                     <option value="1440">1 day before</option>
                   </select>
+                  {s.dRemind !== 'none' && (
+                    <div style={css('font-size:10.5px; color:rgba(255,255,255,.38); line-height:1.6;')}>
+                      {isExtension
+                        ? 'A desktop notification fires then, even if no Locus tab is open. Tasks with no time are treated as 9:00 am.'
+                        : 'Notifications only fire in the packaged extension, not in the dev preview.'}
+                    </div>
+                  )}
                 </div>
                 <div style={css('display:flex; justify-content:flex-end; gap:8px; margin-top:2px;')}>
                   <div onClick={closeModal} style={css('padding:10px 16px; font-size:12.5px; font-weight:600; color:rgba(255,255,255,.55); cursor:pointer;')}>
@@ -2174,18 +2613,40 @@ export default function App() {
                   <div
                     onClick={() => {
                       if (!s.dTitle.trim()) return
-                      set((st) => ({
-                        tasks: [
-                          ...st.tasks,
-                          { id: Date.now(), title: st.dTitle.trim(), due: st.dDue || todayIso, time: st.dTime, priority: st.dPrio, completed: false },
-                        ],
-                        modal: null,
-                        filter: (st.dDue || todayIso) > todayIso ? 'upcoming' : 'today',
-                      }))
+                      set((st) => {
+                        const due = st.dDue || todayIso
+                        if (st.dTaskId != null) {
+                          return {
+                            tasks: st.tasks.map((t) =>
+                              t.id === st.dTaskId
+                                ? { ...t, title: st.dTitle.trim(), due, time: st.dTime, priority: st.dPrio, remind: st.dRemind }
+                                : t,
+                            ),
+                            modal: null,
+                          }
+                        }
+                        return {
+                          tasks: [
+                            ...st.tasks,
+                            {
+                              id: Date.now(),
+                              title: st.dTitle.trim(),
+                              due,
+                              time: st.dTime,
+                              priority: st.dPrio,
+                              completed: false,
+                              remind: st.dRemind,
+                              subs: [],
+                            },
+                          ],
+                          modal: null,
+                          filter: due > todayIso ? 'upcoming' : 'today',
+                        }
+                      })
                     }}
                     style={css('background:rgba(76,141,255,.95); border-radius:11px; padding:10px 20px; font-size:12.5px; font-weight:600; cursor:pointer;')}
                   >
-                    Add task
+                    {s.dTaskId != null ? 'Save changes' : 'Add task'}
                   </div>
                 </div>
               </div>
@@ -2335,414 +2796,58 @@ export default function App() {
             )}
 
             {s.modal === 'habits' && (
-              <div style={css('display:flex; flex-direction:column; gap:14px;')}>
-                <div style={css('font-size:12px; color:rgba(255,255,255,.42);')}>Last 7 days · click a cell to mark it complete</div>
-                <div style={css('overflow-x:auto;')}>
-                  <div style={css('display:grid; grid-template-columns:minmax(140px,1fr) repeat(7,34px) 46px 26px; gap:6px; align-items:center; min-width:460px;')}>
-                    <div />
-                    {habitCols.map((c, i) => (
-                      <div key={i} style={css('font-size:9px; font-weight:600; letter-spacing:.1em; color:rgba(255,255,255,.35); text-align:center;')}>
-                        {c}
-                      </div>
-                    ))}
-                    <div style={css('font-size:9px; font-weight:600; letter-spacing:.1em; color:rgba(255,255,255,.35); text-align:center;')}>STREAK</div>
-                    <div />
-                    {habitRows.map((h) => (
-                      <div key={h.id} style={{ display: 'contents' }}>
-                        <input
-                          value={h.name}
-                          onChange={(e) => {
-                            const v = e.target.value
-                            set((st) => ({ habits: st.habits.map((x) => (x.id === h.id ? { ...x, name: v } : x)) }))
-                          }}
-                          onBlur={(e) => {
-                            if (!e.target.value.trim())
-                              set((st) => ({ habits: st.habits.map((x) => (x.id === h.id ? { ...x, name: 'Untitled habit' } : x)) }))
-                          }}
-                          aria-label="Habit name"
-                          style={css(
-                            'width:100%; border:0; background:transparent; border-radius:6px; padding:5px 6px; font-size:12.5px; font-weight:500; color:rgba(255,255,255,.9);',
-                          )}
-                        />
-                        {h.days.map((on, di) => (
-                          <div
-                            key={di}
-                            onClick={() =>
-                              set((st) => ({
-                                habits: st.habits.map((x) => (x.id === h.id ? { ...x, days: x.days.map((v, k) => (k === di ? !v : v)) } : x)),
-                              }))
-                            }
-                            style={{
-                              width: 34,
-                              height: 28,
-                              borderRadius: 8,
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              cursor: 'pointer',
-                              fontFamily: 'Material Symbols Rounded',
-                              fontSize: 15,
-                              lineHeight: 1,
-                              color: '#fff',
-                              border: '1px solid ' + (on ? 'rgba(76,141,255,.95)' : 'rgba(255,255,255,.14)'),
-                              background: on ? 'rgba(76,141,255,.55)' : 'rgba(255,255,255,.05)',
-                            }}
-                          >
-                            {on ? 'check' : ''}
-                          </div>
-                        ))}
-                        <div style={css('font-size:11.5px; font-weight:600; color:rgba(124,160,255,.95); text-align:center;')}>{h.streak}</div>
-                        <Box
-                          onClick={() =>
-                            withUndo('Habit deleted', ['habits'], (st) => ({ habits: st.habits.filter((x) => x.id !== h.id) }))
-                          }
-                          title="Delete habit"
-                          sx="display:flex; align-items:center; justify-content:center; font-family:'Material Symbols Rounded'; line-height:1; font-size:15px; color:rgba(255,255,255,.3); cursor:pointer;"
-                          hover="color:rgba(255,140,130,.95)"
-                        >
-                          delete_outline
-                        </Box>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div style={css('display:flex; gap:9px; align-items:center; border-top:1px solid rgba(255,255,255,.09); padding-top:14px;')}>
-                  <input value={s.dHabit} onChange={(e) => set({ dHabit: e.target.value })} placeholder="New habit — e.g. Sleep 8 hours" style={css('flex:1; padding:11px 13px; font-size:13px;')} />
-                  <div
-                    onClick={() => {
-                      if (!s.dHabit.trim()) return
-                      set((st) => ({
-                        habits: [...st.habits, { id: Date.now(), name: st.dHabit.trim(), days: [false, false, false, false, false, false, false] }],
-                        dHabit: '',
-                      }))
-                    }}
-                    style={css('background:rgba(76,141,255,.95); border-radius:11px; padding:11px 17px; font-size:12.5px; font-weight:600; cursor:pointer; white-space:nowrap;')}
-                  >
-                    Add habit
-                  </div>
-                </div>
-              </div>
+              <HabitsModal
+                s={s}
+                set={set}
+                today={today}
+                onToggle={toggleHabitDay}
+                onDelete={deleteHabit}
+              />
             )}
 
             {s.modal === 'import' && (
-              <div style={css('display:flex; flex-direction:column; gap:16px;')}>
-                <div style={css('background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.08); border-radius:13px; padding:14px; display:flex; flex-direction:column; gap:8px;')}>
-                  <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>CURRENT DATA</div>
-                  {[
-                    ['Boards', s.boards.length],
-                    ['Bookmarks', bmCount],
-                    ['Notes', s.notes.length],
-                    ['Tasks', s.tasks.length],
-                    ['Habits', s.habits.length],
-                  ].map(([label, value]) => (
-                    <div key={label} style={css('display:flex; justify-content:space-between; font-size:12.5px; color:rgba(255,255,255,.7);')}>
-                      <span>{label}</span>
-                      <span style={css('font-weight:600; color:#fff;')}>{value}</span>
-                    </div>
-                  ))}
-                </div>
-                <div style={css('display:flex; gap:10px;')}>
-                  <div onClick={doExport} style={css('flex:1; text-align:center; background:rgba(76,141,255,.95); border-radius:11px; padding:11px; font-size:12.5px; font-weight:600; cursor:pointer;')}>
-                    Export JSON
-                  </div>
-                  <Box
-                    as="label"
-                    sx="flex:1; text-align:center; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); border-radius:11px; padding:11px; font-size:12.5px; font-weight:600; cursor:pointer;"
-                    hover="background:rgba(255,255,255,.14)"
-                  >
-                    Import file…
-                    <input
-                      type="file"
-                      accept="application/json,.json,text/html,.html,.htm"
-                      onChange={onImportFile}
-                      style={{ display: 'none' }}
-                    />
-                  </Box>
-                </div>
-                {s.importError && <div style={css('font-size:12px; color:rgba(255,138,128,.95); line-height:1.6;')}>{s.importError}</div>}
-
-                {s.importPreview && parsed && (
-                  <div style={css('border:1px dashed rgba(255,255,255,.22); border-radius:13px; padding:14px; display:flex; flex-direction:column; gap:11px;')}>
-                    <div style={css('display:flex; align-items:center; gap:8px;')}>
-                      <span style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>DETECTED</span>
-                      <span style={css('font-size:12px; font-weight:600; color:#fff;')}>{parsed.source}</span>
-                      {parsed.confidence === 'heuristic' && (
-                        <span style={css('font-size:9.5px; font-weight:700; letter-spacing:.06em; padding:2px 7px; border-radius:5px; background:rgba(251,191,36,.16); color:rgba(253,214,110,.95);')}>
-                          BEST GUESS
-                        </span>
-                      )}
-                    </div>
-
-                    {(() => {
-                      const bmTotal = parsed.boards.reduce((a, b) => a + b.bookmarks.length, 0)
-                      const rows: [string, number][] = [
-                        ['Boards', parsed.boards.length],
-                        ['Bookmarks', bmTotal],
-                        ['Notes', parsed.notes.length],
-                        ['Tasks', parsed.tasks.length],
-                        ['Habits', parsed.habits.length],
-                        ['Journal entries', parsed.journal.length],
-                      ]
-                      return (
-                        <div style={css('display:flex; flex-direction:column; gap:5px;')}>
-                          {rows
-                            .filter(([, n]) => n > 0)
-                            .map(([label, n]) => (
-                              <div key={label} style={css('display:flex; justify-content:space-between; font-size:12px; color:rgba(255,255,255,.72);')}>
-                                <span>{label}</span>
-                                <span style={css('font-weight:600; color:#fff;')}>+{n}</span>
-                              </div>
-                            ))}
-                        </div>
-                      )
-                    })()}
-
-                    {parsed.boards.length > 0 && (
-                      <div style={css('max-height:120px; overflow-y:auto; display:flex; flex-direction:column; gap:3px; border-top:1px solid rgba(255,255,255,.08); padding-top:9px;')}>
-                        {parsed.boards.map((b, i) => (
-                          <div key={i} style={css('display:flex; justify-content:space-between; font-size:11px; color:rgba(255,255,255,.6);')}>
-                            <span style={css('overflow:hidden; text-overflow:ellipsis; white-space:nowrap;')}>{b.name}</span>
-                            <span style={css('flex-shrink:0; color:rgba(255,255,255,.4);')}>{b.bookmarks.length}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {parsed.warnings.length > 0 && (
-                      <div style={css('border-top:1px solid rgba(255,255,255,.08); padding-top:9px; display:flex; flex-direction:column; gap:4px;')}>
-                        {parsed.warnings.map((w, i) => (
-                          <div key={i} style={css('font-size:10.5px; color:rgba(253,214,110,.9); line-height:1.5;')}>
-                            • {w}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    <div style={css('font-size:10.5px; color:rgba(255,255,255,.4); line-height:1.5;')}>
-                      Bookmarks merge into boards of the same name; duplicate URLs and already-present notes/tasks/habits are
-                      skipped. Your existing data is kept.
-                    </div>
-
-                    <div style={css('display:flex; justify-content:flex-end; gap:8px;')}>
-                      <div
-                        onClick={() => {
-                          setParsed(null)
-                          set({ importPreview: false })
-                        }}
-                        style={css('padding:8px 14px; font-size:12px; font-weight:600; color:rgba(255,255,255,.55); cursor:pointer;')}
-                      >
-                        Cancel
-                      </div>
-                      <div
-                        onClick={() => !importing && void confirmImport()}
-                        style={{
-                          ...css('background:rgba(76,141,255,.95); border-radius:10px; padding:8px 16px; font-size:12px; font-weight:600; cursor:pointer;'),
-                          opacity: importing ? 0.6 : 1,
-                        }}
-                      >
-                        {importing ? 'Importing…' : 'Import'}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div style={css('font-size:11px; color:rgba(255,255,255,.35); line-height:1.6;')}>
-                  Everything stays on this device. Import understands Locus backups, Boardmarks exports, browser
-                  bookmark HTML files (Chrome / Firefox / Safari / Edge), Chrome's Bookmarks file, and makes a best-effort
-                  pass at other JSON exports.
-                </div>
-              </div>
+              <ImportModal
+                s={s}
+                set={set}
+                bmCount={bmCount}
+                parsed={parsed}
+                importing={importing}
+                onExport={doExport}
+                onImportFile={onImportFile}
+                onCancelPreview={() => {
+                  setParsed(null)
+                  set({ importPreview: false })
+                }}
+                onConfirm={() => void confirmImport()}
+              />
             )}
 
             {s.modal === 'settings' && (
-              <div style={css('display:flex; flex-direction:column; gap:18px; max-height:62vh; overflow-y:auto;')}>
-                <div style={css('display:flex; flex-direction:column; gap:11px;')}>
-                  <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>APPEARANCE</div>
-                  <div style={css('display:flex; align-items:center; justify-content:space-between; gap:14px;')}>
-                    <span style={css('font-size:12.5px; color:rgba(255,255,255,.78);')}>Background image / GIF</span>
-                    <div style={css('display:flex; gap:8px;')}>
-                      <Box as="label" sx="position:relative; background:rgba(76,141,255,.95); border-radius:9px; padding:7px 13px; font-size:11.5px; font-weight:600; cursor:pointer; white-space:nowrap; overflow:hidden;">
-                        Upload…
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp,image/gif,image/*"
-                          onChange={onBgFile}
-                          style={css('position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; border:0; background:transparent; padding:0;')}
-                        />
-                      </Box>
-                      {s.bgImage && (
-                        <Box
-                          onClick={() => set({ bgImage: null })}
-                          sx="background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); border-radius:9px; padding:7px 13px; font-size:11.5px; font-weight:600; cursor:pointer; white-space:nowrap;"
-                          hover="background:rgba(255,255,255,.14)"
-                        >
-                          Remove
-                        </Box>
-                      )}
-                    </div>
-                  </div>
-                  <div style={css('font-size:11px; color:rgba(255,255,255,.35); line-height:1.6;')}>
-                    Pick any photo or GIF from your computer. Panels stay legible on any wallpaper.
-                  </div>
-                </div>
-                <div style={css('display:flex; flex-direction:column; gap:11px; border-top:1px solid rgba(255,255,255,.09); padding-top:16px;')}>
-                  <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>CLOCK &amp; SEARCH</div>
-                  <div style={css('display:flex; align-items:center; justify-content:space-between; gap:14px;')}>
-                    <span style={css('font-size:12.5px; color:rgba(255,255,255,.78);')}>24-hour time</span>
-                    <div
-                      onClick={() => set({ h24: !s.h24 })}
-                      style={{
-                        width: 40,
-                        height: 22,
-                        borderRadius: 11,
-                        cursor: 'pointer',
-                        padding: 2,
-                        display: 'flex',
-                        alignItems: 'center',
-                        background: s.h24 ? 'rgba(76,141,255,.95)' : 'rgba(255,255,255,.14)',
-                        justifyContent: s.h24 ? 'flex-end' : 'flex-start',
-                      }}
-                    >
-                      <div style={{ width: 18, height: 18, borderRadius: '50%', background: '#fff' }} />
-                    </div>
-                  </div>
-                  <div style={css('display:flex; align-items:center; justify-content:space-between; gap:14px;')}>
-                    <span style={css('font-size:12.5px; color:rgba(255,255,255,.78);')}>Default search engine</span>
-                    <select value={s.engine} onChange={(e) => set({ engine: e.target.value as State['engine'] })} style={css('padding:8px 11px; font-size:12px;')}>
-                      <option value="Google">Google</option>
-                      <option value="Images">Google Images</option>
-                      <option value="Bing">Bing</option>
-                      <option value="DuckDuckGo">DuckDuckGo</option>
-                      <option value="YouTube">YouTube</option>
-                    </select>
-                  </div>
-                </div>
-                <div style={css('display:flex; flex-direction:column; gap:11px; border-top:1px solid rgba(255,255,255,.09); padding-top:16px;')}>
-                  <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>GOOGLE APPS</div>
-                  <div style={css('display:flex; align-items:center; gap:12px;')}>
-                    <div
-                      onClick={() => set({ gappsOn: !s.gappsOn })}
-                      style={{
-                        width: 40,
-                        height: 22,
-                        borderRadius: 11,
-                        cursor: 'pointer',
-                        padding: 2,
-                        flexShrink: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        background: s.gappsOn ? 'rgba(76,141,255,.95)' : 'rgba(255,255,255,.14)',
-                        justifyContent: s.gappsOn ? 'flex-end' : 'flex-start',
-                      }}
-                    >
-                      <div style={{ width: 18, height: 18, borderRadius: '50%', background: '#fff' }} />
-                    </div>
-                    <span style={css('font-size:12.5px; color:rgba(255,255,255,.78);')}>{s.gappsOn ? 'On' : 'Off'}</span>
-                  </div>
-                  <div style={css('font-size:11px; color:rgba(255,255,255,.35); line-height:1.6;')}>
-                    Shows the Google Apps launcher — the grid icon next to the clock.
-                  </div>
-                  {s.gappsOn && (
-                    <>
-                      <div style={css('display:flex; align-items:center; justify-content:space-between; padding-top:4px;')}>
-                        <span style={css('font-size:11px; font-weight:600; color:rgba(255,255,255,.55);')}>
-                          Apps in the launcher
-                        </span>
-                        <div style={css('display:flex; align-items:center; gap:12px;')}>
-                          <span style={css('font-size:10.5px; color:rgba(255,255,255,.35);')}>{s.gapps.length} shown</span>
-                          <Box
-                            onClick={() => set({ gapps: [...DEFAULT_GAPPS] })}
-                            sx="font-size:11px; font-weight:600; color:rgba(150,185,255,.9); cursor:pointer;"
-                            hover="color:#fff"
-                          >
-                            Reset
-                          </Box>
-                        </div>
-                      </div>
-                      <div style={css('display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; max-height:38vh; overflow-y:auto;')}>
-                        {GAPP_CATALOG.map((a) => {
-                          const on = s.gapps.includes(a.key)
-                          return (
-                            <Box
-                              key={a.key}
-                              onClick={() =>
-                                set((st) => ({
-                                  gapps: on ? st.gapps.filter((k) => k !== a.key) : [...st.gapps, a.key],
-                                }))
-                              }
-                              sx={
-                                'display:flex; align-items:center; gap:8px; padding:8px 9px; border-radius:9px; cursor:pointer; border:1px solid ' +
-                                (on ? 'rgba(76,141,255,.4)' : 'rgba(255,255,255,.08)') +
-                                '; background:' +
-                                (on ? 'rgba(76,141,255,.12)' : 'rgba(255,255,255,.03)') +
-                                ';'
-                              }
-                              hover="background:rgba(255,255,255,.08)"
-                            >
-                              <span
-                                style={{
-                                  fontFamily: 'Material Symbols Rounded',
-                                  fontSize: 16,
-                                  lineHeight: 1,
-                                  flexShrink: 0,
-                                  color: on ? 'rgba(120,170,255,.98)' : 'rgba(255,255,255,.28)',
-                                }}
-                              >
-                                {on ? 'check_box' : 'check_box_outline_blank'}
-                              </span>
-                              <GappIcon appKey={a.key} glyph={a.glyph} tint={a.c} size={18} radius={5} />
-                              <span style={css('flex:1; min-width:0; font-size:11.5px; font-weight:500; color:rgba(255,255,255,.82); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;')}>
-                                {a.name}
-                              </span>
-                            </Box>
-                          )
-                        })}
-                      </div>
-                    </>
-                  )}
-                </div>
-
-                <div style={css('display:flex; flex-direction:column; gap:10px; border-top:1px solid rgba(255,255,255,.09); padding-top:16px;')}>
-                  <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>HELP</div>
-                  <Box
-                    onClick={() => {
-                      set({ modal: null })
-                      setShowTour(true)
-                    }}
-                    sx="align-self:flex-start; border:1px solid rgba(124,160,255,.5); color:rgba(150,185,255,.95); border-radius:10px; padding:9px 15px; font-size:12px; font-weight:600; cursor:pointer;"
-                    hover="background:rgba(76,141,255,.14)"
-                  >
-                    Replay walkthrough
-                  </Box>
-                </div>
-                <div style={css('display:flex; flex-direction:column; gap:10px; border-top:1px solid rgba(255,255,255,.09); padding-top:16px;')}>
-                  <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>DATA</div>
-                  <Box
-                    onClick={() => set({ ...emptyLocal(), modal: null, filter: 'today', pageData: {}, pages: [{ id: 1, name: 'Home' }], activePage: 1 })}
-                    sx="align-self:flex-start; border:1px solid rgba(255,138,128,.5); color:rgba(255,150,140,.95); border-radius:10px; padding:9px 15px; font-size:12px; font-weight:600; cursor:pointer;"
-                    hover="background:rgba(255,120,110,.14)"
-                  >
-                    Reset to first run
-                  </Box>
-                  <div style={css('font-size:11px; color:rgba(255,255,255,.35);')}>
-                    Clears notes, tasks, journal entries and habits on every page. Your Chrome bookmarks are not touched.
-                  </div>
-                </div>
-
-                {FEEDBACK_URL && (
-                  <div style={css('display:flex; flex-direction:column; gap:10px; border-top:1px solid rgba(255,255,255,.09); padding-top:16px;')}>
-                    <div style={css('font-size:10px; font-weight:600; letter-spacing:.14em; color:rgba(255,255,255,.42);')}>BETA</div>
-                    <Box
-                      onClick={() => open(FEEDBACK_URL)}
-                      sx="align-self:flex-start; border:1px solid rgba(124,160,255,.5); color:rgba(150,185,255,.95); border-radius:10px; padding:9px 15px; font-size:12px; font-weight:600; cursor:pointer;"
-                      hover="background:rgba(76,141,255,.14)"
-                    >
-                      Send feedback / report a bug
-                    </Box>
-                  </div>
-                )}
-              </div>
+              <SettingsModal
+                s={s}
+                set={set}
+                onBgFile={onBgFile}
+                onAdjustBg={() => set({ bgAdjust: true, modal: null })}
+                onRemoveBg={() => set({ bgImage: null, ...DEFAULT_BG_STATE })}
+                onReplayTour={() => {
+                  set({ modal: null })
+                  setShowTour(true)
+                }}
+                onReset={() =>
+                  set({
+                    ...emptyLocal(),
+                    modal: null,
+                    filter: 'today',
+                    pageData: {},
+                    pages: [{ id: 1, name: 'Home' }],
+                    activePage: 1,
+                  })
+                }
+                onBackupNow={() => void runBackup(false)}
+              />
             )}
+
+            {s.modal === 'shortcuts' && <ShortcutsModal />}
 
             {s.modal === 'histpage' && (
               <div style={css('display:flex; flex-direction:column; gap:12px;')}>
@@ -2833,11 +2938,16 @@ export default function App() {
                 </div>
               </div>
             )}
+            </Suspense>
           </div>
         </div>
       )}
 
-      {showTour && <Walkthrough onClose={() => setShowTour(false)} />}
+      {s.bgAdjust && s.bgImage && (
+        <WallpaperAdjust src={s.bgImage} value={bgT} onChange={setBgT} onDone={() => set({ bgAdjust: false })} />
+      )}
+
+      <Suspense fallback={null}>{showTour && <Walkthrough onClose={() => setShowTour(false)} />}</Suspense>
     </div>
   )
 }

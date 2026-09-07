@@ -39,19 +39,14 @@ const STEPS: Step[] = [
   },
   {
     target: 'notes',
-    title: 'Notes',
+    title: 'Quick Notes',
     body: 'Quick titled notes for this page. Click one to edit, use “+” to add. Nothing fancy — just somewhere to dump a thought.',
   },
   {
-    target: 'habits',
-    title: 'Habit tracker',
-    body:
-      'A rolling 7-day grid. Click a cell to mark a day done. Open it to add habits, rename (click the name) or delete (with undo).',
-  },
-  {
     target: 'calendar',
-    title: 'Calendar journal',
-    body: 'Click any day to add a dated entry with a category. A dot marks days that already have notes. Arrows move between months.',
+    title: 'Calendar',
+    body:
+      'Everything dated lives here. Click a day to tick habits, check off tasks due and write a journal entry. Coloured dots mark what each day holds; the repeat icon opens the habit tracker.',
   },
   {
     target: 'tasks',

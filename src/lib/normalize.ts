@@ -14,10 +14,29 @@ const bool = (v: any) => v === true
 
 const nextId = nid
 
+/** Flatten journal entries written by the removed rich-text editor. */
+function plainJournalDesc(value: any): string {
+  return str(value)
+    .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/(div|p|h[1-6]|li)>/gi, '\n')
+    .replace(/<hr\s*\/?\s*>/gi, '\n--------------------\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/^\s*#{1,4}\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
 function normNote(n: any): Note | null {
   if (!isObj(n)) return null
   return { id: num(n.id, nextId()), title: str(n.title), text: str(n.text) }
 }
+
+const REMINDS = ['none', 'at', '5', '15', '60', '1440']
 
 function normTask(t: any): Task | null {
   if (!isObj(t)) return null
@@ -29,14 +48,42 @@ function normTask(t: any): Task | null {
     time: str(t.time),
     priority,
     completed: bool(t.completed),
+    remind: REMINDS.includes(str(t.remind)) ? str(t.remind) : 'none',
+    subs: isArr(t.subs)
+      ? t.subs
+          .filter(isObj)
+          .map((x: any) => ({ id: num(x.id, nextId()), title: str(x.title), done: bool(x.done) }))
+          .filter((x: { title: string }) => x.title.trim().length > 0)
+      : [],
   }
 }
 
+const ISO_RE = /^\d{4}-\d{2}-\d{2}$/
+
 function normHabit(h: any): Habit | null {
   if (!isObj(h)) return null
-  const days = isArr(h.days) ? h.days.slice(0, 7).map(bool) : []
-  while (days.length < 7) days.push(false)
-  return { id: num(h.id, nextId()), name: str(h.name), days }
+  let done: string[]
+  if (isArr(h.done)) {
+    done = [...new Set(h.done.filter((d: any) => typeof d === 'string' && ISO_RE.test(d)))] as string[]
+  } else if (isArr(h.days)) {
+    // legacy: 7 booleans oldest -> newest, anchor the newest slot to today
+    const days = h.days.slice(-7).map(bool)
+    const localIso = (ms: number) => {
+      const d = new Date(ms)
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    }
+    const base = Date.now()
+    done = days
+      .map((on: boolean, i: number) => (on ? localIso(base - (days.length - 1 - i) * 86400000) : null))
+      .filter((d: string | null): d is string => !!d)
+  } else {
+    done = []
+  }
+  return {
+    id: num(h.id, nextId()),
+    name: str(h.name),
+    done,
+  }
 }
 
 function normDateNotes(v: any): Record<string, DateNote[]> {
@@ -49,7 +96,7 @@ function normDateNotes(v: any): Record<string, DateNote[]> {
       .map((n: any): DateNote => ({
         id: num(n.id, nextId()),
         title: str(n.title),
-        desc: str(n.desc),
+        desc: plainJournalDesc(n.desc),
         category: str(n.category, 'Personal'),
         created: num(n.created, Date.now()),
         updated: num(n.updated, Date.now()),
@@ -82,6 +129,9 @@ export function normalizeLocal(p: any): Partial<State> {
   if ('tasks' in p) out.tasks = isArr(p.tasks) ? compact(p.tasks.map(normTask)) : []
   if ('habits' in p) out.habits = isArr(p.habits) ? compact(p.habits.map(normHabit)) : []
   if ('dateNotes' in p) out.dateNotes = normDateNotes(p.dateNotes)
+  if ('notesPanelHeight' in p && Number.isFinite(Number(p.notesPanelHeight))) {
+    out.notesPanelHeight = Math.min(72, Math.max(28, Number(p.notesPanelHeight)))
+  }
 
   if (isArr(p.gapps)) {
     const keys = p.gapps.filter((k: any) => typeof k === 'string' && GAPP_KEYS.has(k))
@@ -100,6 +150,18 @@ export function normalizeLocal(p: any): Partial<State> {
   }
 
   if ('gappsOn' in p) out.gappsOn = p.gappsOn !== false
+
+  if ('bgFit' in p && (p.bgFit === 'cover' || p.bgFit === 'contain')) out.bgFit = p.bgFit
+  if ('bgZoom' in p && Number.isFinite(Number(p.bgZoom)))
+    out.bgZoom = Math.min(5, Math.max(1, Number(p.bgZoom)))
+  if ('bgX' in p && Number.isFinite(Number(p.bgX))) out.bgX = Math.min(0.5, Math.max(-0.5, Number(p.bgX)))
+  if ('bgY' in p && Number.isFinite(Number(p.bgY))) out.bgY = Math.min(0.5, Math.max(-0.5, Number(p.bgY)))
+
+  if ('lastBackup' in p) out.lastBackup = Math.max(0, num(p.lastBackup, 0))
+  if ('backupEvery' in p) {
+    const every = Math.round(num(p.backupEvery, 7))
+    out.backupEvery = [0, 1, 7, 30].includes(every) ? every : 7
+  }
 
   if ('h24' in p) out.h24 = bool(p.h24)
   if ('engine' in p && ['Google', 'Images', 'Bing', 'DuckDuckGo', 'YouTube'].includes(p.engine)) out.engine = p.engine

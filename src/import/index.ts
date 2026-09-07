@@ -83,18 +83,30 @@ export function buildApplyPlan(result: ImportResult, s: State): ApplyPlan {
       title: t.title,
       due: t.due || today,
       time: t.time,
+      subs: [],
       priority: t.priority,
       completed: t.completed,
+      remind: t.remind ?? 'none',
     })
   }
 
-  const seenHabits = new Set(s.habits.map((h) => norm(h.name)))
+  // A habit that already exists keeps its own row but absorbs any completion
+  // dates from the file, so restoring a backup rebuilds history instead of
+  // silently dropping it.
   const habits: Habit[] = [...s.habits]
+  const habitAt = new Map(habits.map((h, i) => [norm(h.name), i]))
   for (const h of result.habits) {
     const k = norm(h.name)
-    if (seenHabits.has(k)) continue
-    seenHabits.add(k)
-    habits.push({ id: nid(), name: h.name, days: [false, false, false, false, false, false, false] })
+    const at = habitAt.get(k)
+    if (at != null) {
+      if (h.done?.length) {
+        const merged = [...new Set([...habits[at].done, ...h.done])].sort()
+        habits[at] = { ...habits[at], done: merged }
+      }
+      continue
+    }
+    habitAt.set(k, habits.length)
+    habits.push({ id: nid(), name: h.name, done: [...new Set(h.done ?? [])].sort() })
   }
 
   const dateNotes: Record<string, DateNote[]> = { ...s.dateNotes }

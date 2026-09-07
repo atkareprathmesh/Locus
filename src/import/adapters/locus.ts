@@ -25,7 +25,7 @@ export const locusAdapter: Adapter = {
     const clean = normalizeLocal(o)
     r.notes = clean.notes ?? []
     r.tasks = clean.tasks ?? []
-    r.habits = (clean.habits ?? []).map((h) => ({ name: h.name }))
+    r.habits = (clean.habits ?? []).map((h) => ({ name: h.name, done: h.done }))
     for (const [date, list] of Object.entries(clean.dateNotes ?? {}))
       for (const n of list) r.journal.push({ date, title: n.title, desc: n.desc, category: n.category })
     if (typeof clean.h24 === 'boolean') r.settings.h24 = clean.h24

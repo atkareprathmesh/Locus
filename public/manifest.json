@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Locus",
   "version": "0.1.1",
-  "description": "Your place on the web. Bookmarks, tasks, habits, calendar, notes and journaling — every time you open a new tab.",
+  "description": "Your place on the web. Bookmarks, tasks, habits, calendar, notes and journaling \u2014 every time you open a new tab.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwAnfza4UZenVAXdBiz3w9VPwCIkVh6aYeDTsEprZgO1t4BEyjw2qkVoRM+RJ5Php/G6a2vetXZNF7HU1Vb3MprWq9XNdFtwQ0kNcMCJhrNlZmn1Y9/8mNR174tnzUNFRRTyryFiscAdWljXJAmsGtv/pjmP8bdsFh9j/Hhq9kbvTGm52rK4LGu508Efx46oQLaoSZoTY8Vt0TIEjq/NFpoEHTaQ6V5li0HaTntOBNIwbm228AIVbxf5QTGtr/+hJJT8VMcMjbPUZh506lmDrb3+38qflSvmi5SJWbza+/Dq9Q2q93JUkKV4YF8pwC9WOHvIPkmgN2cELlXjuFWOBhwIDAQAB",
   "chrome_url_overrides": {
     "newtab": "index.html"
@@ -24,7 +24,10 @@
     "bookmarks",
     "history",
     "topSites",
-    "favicon"
+    "favicon",
+    "alarms",
+    "notifications",
+    "downloads"
   ],
   "icons": {
     "16": "icons/icon16.png",

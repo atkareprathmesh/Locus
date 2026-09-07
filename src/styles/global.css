@@ -23,3 +23,36 @@ option { background: #161b22; color: #fff; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .3); }
 input[type=range] { accent-color: #4c8dff; background: transparent; border: 0; }
 @keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.99); } to { opacity: 1; transform: none; } }
+
+/* Keep the two side rails visually balanced, then stack them before they get cramped. */
+@media (max-width: 1100px) {
+  .dashboard-grid {
+    grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) !important;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .dashboard-left { grid-column: 1; grid-row: 1; }
+  .dashboard-right { grid-column: 2; grid-row: 1; }
+  .dashboard-boards { grid-column: 1 / -1; grid-row: 2; min-height: 320px !important; }
+}
+
+@media (max-width: 720px) {
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: auto;
+    gap: 12px;
+  }
+
+  .dashboard-left,
+  .dashboard-right,
+  .dashboard-boards {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .dashboard-left { min-height: 420px !important; }
+  .dashboard-right { min-height: 280px !important; }
+  .dashboard-boards { min-height: 400px !important; }
+}

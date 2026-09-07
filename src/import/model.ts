@@ -14,6 +14,14 @@ export interface ImportTask {
   time: string
   priority: Priority
   completed: boolean
+  /** Only Locus's own backups carry this; other formats leave it undefined. */
+  remind?: string
+}
+
+export interface ImportHabit {
+  name: string
+  /** Completion dates, present only when restoring a Locus backup. */
+  done?: string[]
 }
 export interface ImportJournal {
   date: string
@@ -30,7 +38,7 @@ export interface ImportResult {
   boards: ImportBoard[]
   notes: { title: string; text: string }[]
   tasks: ImportTask[]
-  habits: { name: string }[]
+  habits: ImportHabit[]
   journal: ImportJournal[]
   settings: { h24?: boolean; engine?: Engine }
   warnings: string[]

@@ -1,4 +1,4 @@
-import type { Engine, Habit, Note, PageData, State, Task } from './types'
+import type { Engine, Note, PageData, State } from './types'
 
 /**
  * Beta feedback form link. Paste your Google Form URL here and rebuild — a
@@ -97,6 +97,24 @@ export const iso = (d: Date) =>
   '-' +
   String(d.getDate()).padStart(2, '0')
 
+/** ISO date `n` days before the given date (n may be negative). DST-safe. */
+export const isoShift = (d: Date, n: number) => {
+  const x = new Date(d)
+  x.setDate(x.getDate() - n)
+  return iso(x)
+}
+
+/**
+ * Consecutive-day streak ending today. A not-yet-checked *today* does not break
+ * the streak — it counts back from yesterday until the first missed day.
+ */
+export const habitStreak = (done: Iterable<string>, today: Date): number => {
+  const set = done instanceof Set ? done : new Set(done)
+  let streak = 0
+  for (let i = set.has(iso(today)) ? 0 : 1; set.has(isoShift(today, i)); i++) streak++
+  return streak
+}
+
 export const stamp = (t: number) =>
   new Date(t).toLocaleString(undefined, {
     day: '2-digit',
@@ -117,29 +135,20 @@ export function dotFor(id: string, index: number): string {
   return DOTS[index % DOTS.length]
 }
 
+/**
+ * First-run content. Deliberately thin — one note explaining the place, and
+ * nothing else. Empty panels carry their own call to action, which reads better
+ * than sample cards the user has to clear out.
+ */
 export function seedLocal(): PageData {
-  const t = new Date()
-  const day = 86400000
   const notes: Note[] = [
     {
       id: 1,
       title: 'Welcome to Locus 👋',
-      text: 'One place to return to every time you open a tab. Everything lives locally in your browser — nothing is uploaded anywhere.\n\n• The left panel is your bookmarks, synced two-way with Chrome\n• Add tasks, notes, habits and a calendar journal\n• Set a wallpaper from the icon in the top-right\n\nThese sample cards are just examples — delete them whenever you like.',
+      text: 'One place to return to every time you open a tab. Everything lives locally in your browser — nothing is uploaded anywhere.\n\n• The left panel is your bookmarks, synced two-way with Chrome\n• Add tasks, notes, habits and a calendar journal\n• Set a wallpaper from the icon in the top-right\n\nPress ? at any time for keyboard shortcuts. Delete this note whenever you like.',
     },
-    { id: 2, title: 'Quick note', text: 'Click a note to edit it. Use “+ Note” to add your own.' },
   ]
-  const tasks: Task[] = [
-    { id: 1, title: 'Add a bookmark to a board', due: iso(t), time: '', priority: 'medium', completed: false },
-    { id: 2, title: 'Pick a wallpaper (top-right icon)', due: iso(t), time: '', priority: 'easy', completed: false },
-    { id: 3, title: 'Plan tomorrow', due: iso(new Date(+t + day)), time: '', priority: 'easy', completed: false },
-    { id: 4, title: 'Finish the walkthrough', due: iso(new Date(+t - day)), time: '', priority: 'easy', completed: true },
-  ]
-  const habits: Habit[] = [
-    { id: 1, name: 'Drink water', days: [true, true, false, true, true, true, false] },
-    { id: 2, name: 'Exercise', days: [true, false, true, false, true, false, false] },
-    { id: 3, name: 'Read', days: [true, true, true, true, false, true, true] },
-  ]
-  return { notes, tasks, habits, dateNotes: {} }
+  return { notes, tasks: [], habits: [], dateNotes: {} }
 }
 
 export function emptyLocal(): PageData {
@@ -153,6 +162,10 @@ export function makeInitialState(): State {
     now: Date.now(),
     monthOffset: 0,
     filter: 'today',
+    prioFilter: 'any',
+    openTasks: [],
+    dSubFor: null,
+    dSub: '',
     engine: 'Google',
     enginesOpen: false,
     query: '',
@@ -162,6 +175,7 @@ export function makeInitialState(): State {
     importPreview: false,
     importError: '',
     h24: false,
+    dTaskId: null,
     dTitle: '',
     dDue: iso(new Date()),
     dTime: '',
@@ -194,6 +208,8 @@ export function makeInitialState(): State {
     dnTitle: '',
     dnDesc: '',
     dnCat: 'Personal',
+    dnOpen: null,
+    notesPanelHeight: 46,
     appsOpen: false,
     gapps: [...DEFAULT_GAPPS],
     gappsOn: true,
@@ -205,6 +221,15 @@ export function makeInitialState(): State {
     lensDrag: false,
     lensPinned: false,
     bgImage: null,
+    bgFit: 'cover',
+    bgZoom: 1,
+    bgX: 0,
+    bgY: 0,
+    bgAdjust: false,
+    lastBackup: 0,
+    backupEvery: 7,
+    backupMsg: '',
+    backupNudge: false,
     boards: [],
     history: [],
     topSites: [],
@@ -217,16 +242,24 @@ export const PERSIST_KEYS: (keyof State)[] = [
   'tasks',
   'habits',
   'dateNotes',
+  'notesPanelHeight',
   'pages',
   'activePage',
   'pageData',
   'h24',
   'engine',
   'filter',
+  'prioFilter',
   'gapps',
   'gappsOn',
   'boardOrder',
   'boardPage',
+  'bgFit',
+  'bgZoom',
+  'bgX',
+  'bgY',
+  'lastBackup',
+  'backupEvery',
 ]
 
 export type Action =

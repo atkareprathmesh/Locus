@@ -44,6 +44,14 @@ are read from and written to Chrome's own bookmark store.
 
 Built with Vite + React + TypeScript. Manifest V3.
 
+### What's new
+
+- **Plain-text calendar journal** — journal entries use a focused title and normal text editor with draft autosave. Rich-text and slash-command formatting are intentionally not included in this version.
+- **Resizable Quick Notes** — use the size slider in the Quick Notes header to give notes more or less room in the left rail.
+- **Focused task workflow** — compact task controls, a centered full-task view, subtasks, reminders, and filters for today, upcoming, backlog, done, and priority.
+- **Pomodoro timer** — configure work and break durations directly from the dashboard.
+- **Offline-first storage** — extension data stays in the browser and the built extension runs without an account, server, analytics, or runtime network requests.
+
 ---
 
 ## Install (unpacked)
@@ -140,7 +148,8 @@ The first time you open a new tab, Locus:
 - **Notes** — lightweight titled text notes.
 - **Habit tracker** — 7-day grid, click a cell to toggle, click the name to
   rename.
-- **Calendar journal** — click any day to add dated entries with categories.
+- **Calendar journal** — click any day to add dated plain-text entries with a
+  title, autosaved draft text, and last-modified metadata.
 - **Pages** — the tabs at the top are independent dashboards: each has its own
   notes, tasks, habits, journal **and bookmark boards** (e.g. Work vs Personal).
 - **Search** — type to search, press `/` anywhere to focus the box. Switch
@@ -178,6 +187,22 @@ npm run build    # tsc -b && vite build  -> dist/
 
 `npx vite build --watch` rebuilds `dist/` on every change; still hit the reload
 icon on the extension card to pick it up.
+
+### Use Locus offline
+
+Locus has no runtime network dependency. After the project has been cloned and
+dependencies have been installed once, build it with:
+
+```bash
+npm run build
+```
+
+Then load the local `dist/` directory through **Load unpacked** in the browser's
+extension manager. The dashboard, notes, tasks, journal, calendar, habits,
+Pomodoro timer, and bookmark UI continue working without an internet connection.
+All personal data is stored locally by the browser. A fresh machine still needs
+the repository files and the installed npm dependencies available locally to
+run a new build; the already-built `dist/` folder can be loaded directly.
 
 ---
 
