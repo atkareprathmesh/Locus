@@ -75,7 +75,7 @@ export const emptyResult = (source: string, confidence: ImportResult['confidence
 
 const ENGINE_MAP: Record<string, Engine> = {
   google: 'Google',
-  images: 'Images',
+  images: 'Google',
   bing: 'Bing',
   duckduckgo: 'DuckDuckGo',
   ddg: 'DuckDuckGo',

@@ -193,6 +193,7 @@ export default function App() {
   }, [])
 
   const searchRef = useRef<HTMLInputElement>(null)
+  const [googleSuggestions, setGoogleSuggestions] = useState<string[]>([])
   const journalRef = useRef<HTMLTextAreaElement>(null)
   const journalEditorRef = useRef<HTMLDivElement>(null)
   const journalDraftHydrated = useRef(false)
@@ -233,21 +234,6 @@ export default function App() {
         dPrio: t.priority,
         dRemind: t.remind,
       }),
-    [set],
-  )
-
-  const readLens = useCallback(
-    (file: File, label?: string) => {
-      const r = new FileReader()
-      r.onload = (ev) =>
-        set({
-          lensImage: String(ev.target?.result ?? ''),
-          lensName: label || file.name,
-          lensDrag: false,
-          searchFocus: true,
-        })
-      r.readAsDataURL(file)
-    },
     [set],
   )
 
@@ -440,8 +426,6 @@ export default function App() {
           gappsEdit: false,
           importPreview: false,
           dnFormOpen: false,
-          lensPinned: false,
-          lensDrag: false,
           dragBoard: null,
           dragOverBoard: null,
           dragBm: null,
@@ -499,31 +483,48 @@ export default function App() {
           break
       }
     }
-    const onPaste = (e: ClipboardEvent) => {
-      if (!e.clipboardData) return
-      for (const item of Array.from(e.clipboardData.items)) {
-        if (item.type.startsWith('image')) {
-          const f = item.getAsFile()
-          if (f) {
-            readLens(f, 'Pasted image')
-            e.preventDefault()
-          }
-          return
-        }
-      }
-    }
     document.addEventListener('keydown', onKey)
-    document.addEventListener('paste', onPaste)
     searchRef.current?.focus()
     return () => {
       document.removeEventListener('keydown', onKey)
-      document.removeEventListener('paste', onPaste)
     }
-  }, [set, readLens, switchPageTo, newNote, newTask])
+  }, [set, switchPageTo, newNote, newTask])
 
   useEffect(() => {
     void readTopSites().then((topSites) => set({ topSites }))
   }, [set])
+
+  // Google exposes the same lightweight suggestion feed used by its search
+  // field. Keep this separate from saved content, so a failed network request
+  // never prevents the local bookmark / note suggestions from working.
+  useEffect(() => {
+    const query = s.query.trim()
+    if (!query || s.engine !== 'Google') {
+      setGoogleSuggestions([])
+      return
+    }
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `https://suggestqueries.google.com/complete/search?client=firefox&q=${encodeURIComponent(query)}`,
+          { signal: controller.signal },
+        )
+        if (!response.ok) return
+        const data: unknown = await response.json()
+        const items = Array.isArray(data) && Array.isArray(data[1]) ? data[1] : []
+        setGoogleSuggestions(items.filter((item): item is string => typeof item === 'string').slice(0, 6))
+      } catch (error) {
+        if ((error as DOMException).name !== 'AbortError') setGoogleSuggestions([])
+      }
+    }, 170)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [s.query, s.engine])
 
   // close the per-board "move to page" menu when the page changes
   useEffect(() => setBoardMenu(null), [s.activePage])
@@ -845,12 +846,22 @@ export default function App() {
   const sq = s.query.trim().toLowerCase()
   const suggestions: { icon: string; label: string; kind: string; onPick: () => void }[] = []
   if (sq) {
-    suggestions.push({
-      icon: s.engine === 'Images' ? 'image_search' : 'search',
-      label: s.query,
-      kind: s.engine === 'Images' ? 'Google Images' : s.engine,
-      onPick: () => open(ENGINES[s.engine] + encodeURIComponent(s.query)),
-    })
+    for (const suggestion of googleSuggestions) {
+      if (suggestions.length < 6)
+        suggestions.push({
+          icon: 'search',
+          label: suggestion,
+          kind: 'Google',
+          onPick: () => open(ENGINES[s.engine] + encodeURIComponent(suggestion)),
+        })
+    }
+    if (!suggestions.some((suggestion) => suggestion.label.toLowerCase() === s.query.toLowerCase()))
+      suggestions.push({
+        icon: 'search',
+        label: s.query,
+        kind: s.engine,
+        onPick: () => open(ENGINES[s.engine] + encodeURIComponent(s.query)),
+      })
     for (const b of pageBoards)
       for (const bm of b.bookmarks) {
         if (suggestions.length < 6 && (bm.title.toLowerCase().includes(sq) || bm.url.toLowerCase().includes(sq)))
@@ -888,8 +899,6 @@ export default function App() {
       ),
     }))
     .filter((g) => g.items.length)
-
-  const showLens = s.engine === 'Images' && (s.searchFocus || s.lensDrag || s.lensPinned || !!s.lensImage)
 
   const wide = ['habits', 'bmsearch', 'settings', 'import', 'note', 'todo', 'histpage'].includes(s.modal || '')
   const titles: Record<string, string> = {
@@ -1043,11 +1052,11 @@ export default function App() {
         }}
       >
         {/* Top bar */}
-        <div style={css('display:flex; align-items:center; gap:clamp(10px,1.2vw,18px); flex-shrink:0;')}>
+        <div style={css('display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); align-items:center; gap:clamp(10px,1.2vw,18px); flex-shrink:0;')}>
           <div
             data-tour="pages"
             style={css(
-              'display:flex; align-items:center; gap:2px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:13px; padding:4px; flex-shrink:0;',
+              'justify-self:start; display:flex; align-items:center; gap:2px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:13px; padding:4px; flex-shrink:0;',
             )}
           >
             {s.pages.map((p) => {
@@ -1167,14 +1176,14 @@ export default function App() {
           </div>
 
           {/* Search */}
-          <div style={css('flex:1; min-width:0; display:flex; justify-content:center;')}>
-            <div data-tour="search" style={css('position:relative; width:100%; max-width:min(620px,46vw);')}>
+          <div style={css('min-width:0; display:flex; justify-content:center;')}>
+            <div data-tour="search" style={css('position:relative; width:min(420px,31vw); min-width:280px;')}>
               <div
                 style={css(
-                  'height:clamp(38px,5vh,46px); background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:14px; display:flex; align-items:center; padding:0 5px 0 15px; gap:10px;',
+                  'height:clamp(42px,5.2vh,50px); background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:999px; display:flex; align-items:center; padding:0 8px 0 16px; gap:9px;',
                 )}
               >
-                <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:18px; color:rgba(255,255,255,.5);")}>
+                <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:19px; color:rgba(255,255,255,.5);")}>
                   search
                 </span>
                 <input
@@ -1185,15 +1194,13 @@ export default function App() {
                     if (e.key === 'Enter' && s.query.trim()) open(ENGINES[s.engine] + encodeURIComponent(s.query))
                   }}
                   onFocus={() => set({ searchFocus: true, appsOpen: false })}
-                  onBlur={() => {
-                    if (!s.lensImage && !s.lensDrag) set({ searchFocus: false })
-                  }}
-                  placeholder={s.engine === 'Images' ? 'Search Google Images…' : 'Search ' + s.engine + '…'}
-                  style={css('flex:1; min-width:0; border:0; background:transparent; font-size:clamp(12px,1.6vh,14px); font-weight:500;')}
+                  onBlur={() => set({ searchFocus: false })}
+                  placeholder="Search Google or type a URL"
+                  style={css('flex:1; min-width:0; border:0; background:transparent; color:#fff; font-size:clamp(12px,1.6vh,14px); font-weight:500;')}
                 />
                 <Box
                   onClick={() => set({ enginesOpen: !s.enginesOpen })}
-                  sx="display:flex; align-items:center; gap:7px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.16); border-radius:10px; padding:6px 11px; font-size:clamp(10px,1.3vh,12px); font-weight:600; color:rgba(255,255,255,.8); cursor:pointer; white-space:nowrap;"
+                  sx="display:flex; align-items:center; gap:4px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.16); border-radius:999px; padding:6px 8px; font-size:clamp(10px,1.3vh,12px); font-weight:600; color:rgba(255,255,255,.8); cursor:pointer; white-space:nowrap;"
                   hover="background:rgba(255,255,255,.14)"
                 >
                   {s.engine}{' '}
@@ -1201,102 +1208,17 @@ export default function App() {
                 </Box>
               </div>
 
-              {showLens && (
-                <div
-                  onMouseDown={() => {
-                    if (!s.lensPinned) set({ lensPinned: true })
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault()
-                    if (!s.lensDrag) set({ lensDrag: true })
-                  }}
-                  onDragLeave={() => set({ lensDrag: false })}
-                  onDrop={(e) => {
-                    e.preventDefault()
-                    const f = e.dataTransfer?.files?.[0]
-                    if (f) readLens(f, f.name)
-                    else set({ lensDrag: false })
-                  }}
-                  style={{
-                    ...css(
-                      'position:absolute; left:0; right:0; top:calc(100% + 8px); z-index:19; text-align:center; border-radius:14px; box-shadow:0 18px 46px rgba(0,0,0,.5); background:rgba(16,21,30,.94); backdrop-filter:blur(16px); animation:rise .12s ease-out;',
-                    ),
-                    border: s.lensDrag ? '1.5px dashed rgba(130,175,255,.9)' : '1.5px solid rgba(255,255,255,.12)',
-                  }}
-                >
-                  {!s.lensImage ? (
-                    <div style={css('display:flex; flex-direction:column; align-items:center; gap:9px; padding:20px 16px;')}>
-                      <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:26px; color:rgba(255,255,255,.4);")}>
-                        image_search
-                      </span>
-                      <div style={css('font-size:12.5px; font-weight:500; color:rgba(255,255,255,.75);')}>
-                        {s.lensDrag ? 'Drop the image to search it' : 'Drag an image here, paste it, or upload'}
-                      </div>
-                      <label
-                        style={css(
-                          'position:relative; overflow:hidden; background:rgba(76,141,255,.95); border-radius:10px; padding:8px 15px; font-size:11.5px; font-weight:600; cursor:pointer;',
-                        )}
-                      >
-                        Upload a file
-                        <input
-                          type="file"
-                          accept="image/*"
-                          onChange={(e) => {
-                            const f = e.target.files?.[0]
-                            if (f) readLens(f, f.name)
-                          }}
-                          style={css('position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; border:0; background:transparent; padding:0;')}
-                        />
-                      </label>
-                    </div>
-                  ) : (
-                    <div style={css('display:flex; align-items:center; gap:13px; padding:13px;')}>
-                      <img
-                        src={s.lensImage}
-                        alt=""
-                        style={{ width: 46, height: 46, borderRadius: 10, objectFit: 'cover', flexShrink: 0, border: '1px solid rgba(255,255,255,.16)' }}
-                      />
-                      <div style={css('flex:1; min-width:0; text-align:left;')}>
-                        <div
-                          style={css(
-                            'font-size:12.5px; font-weight:600; color:rgba(255,255,255,.92); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
-                          )}
-                        >
-                          {s.lensName}
-                        </div>
-                        <div style={css('font-size:10.5px; color:rgba(255,255,255,.4); margin-top:3px;')}>Ready to search by image</div>
-                      </div>
-                      <Box
-                        onClick={() => set({ lensImage: null, lensName: '', lensPinned: false, lensDrag: false })}
-                        title="Remove"
-                        sx="font-family:'Material Symbols Rounded'; line-height:1; font-size:16px; color:rgba(255,255,255,.4); cursor:pointer; flex-shrink:0;"
-                        hover="color:rgba(255,140,130,.95)"
-                      >
-                        close
-                      </Box>
-                      <Box
-                        onClick={() => open('https://lens.google.com/upload')}
-                        sx="background:rgba(76,141,255,.95); border-radius:10px; padding:9px 16px; font-size:11.5px; font-weight:600; cursor:pointer; flex-shrink:0; white-space:nowrap;"
-                        hover="background:rgba(96,157,255,1)"
-                      >
-                        Search
-                      </Box>
-                    </div>
-                  )}
-                </div>
-              )}
-
               {hasSuggest && (
                 <div
                   style={css(
-                    'position:absolute; left:0; right:0; top:calc(100% + 8px); background:rgba(16,21,30,.94); backdrop-filter:blur(16px); border:1px solid rgba(255,255,255,.12); border-radius:14px; box-shadow:0 18px 46px rgba(0,0,0,.5); overflow:hidden; z-index:19; padding:6px; animation:rise .12s ease-out;',
+                      'position:absolute; left:0; right:0; top:calc(100% + 8px); background:rgba(42,42,42,.97); backdrop-filter:blur(16px); border:1px solid rgba(255,255,255,.12); border-radius:24px; box-shadow:0 18px 46px rgba(0,0,0,.5); overflow:hidden; z-index:19; padding:8px; animation:rise .12s ease-out;',
                   )}
                 >
                   {suggestions.map((sg, i) => (
                     <Box
                       key={i}
                       onMouseDown={sg.onPick}
-                      sx="display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:10px; cursor:pointer;"
+                      sx="display:flex; align-items:center; gap:11px; padding:10px 12px; border-radius:16px; cursor:pointer;"
                       hover="background:rgba(255,255,255,.09)"
                     >
                       <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(255,255,255,.42); flex-shrink:0;")}>
@@ -1324,20 +1246,20 @@ export default function App() {
                   {(Object.keys(ENGINES) as (keyof typeof ENGINES)[]).map((name) => (
                     <Box
                       key={name}
-                      onClick={() => set({ engine: name, enginesOpen: false, lensPinned: false, lensImage: null, lensName: '' })}
+                      onClick={() => set({ engine: name, enginesOpen: false })}
                       sx="padding:9px 12px; border-radius:9px; font-size:12.5px; font-weight:500; color:rgba(255,255,255,.8); cursor:pointer;"
                       hover="background:rgba(255,255,255,.09)"
                     >
-                      {name === 'Images' ? 'Google Images' : name}
+                      {name}
                     </Box>
-                  ))}
+                    ))}
                 </div>
               )}
             </div>
           </div>
 
           {/* Right cluster */}
-          <div data-tour="toolbar" style={css('display:flex; align-items:center; gap:8px; flex-shrink:0;')}>
+          <div data-tour="toolbar" style={css('justify-self:end; display:flex; align-items:center; gap:8px; flex-shrink:0;')}>
             <Clock h24={s.h24} />
             {s.gappsOn && (
             <div style={css('position:relative;')}>

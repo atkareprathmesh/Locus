@@ -29,6 +29,9 @@
     "notifications",
     "downloads"
   ],
+  "host_permissions": [
+    "https://suggestqueries.google.com/*"
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

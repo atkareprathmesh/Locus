@@ -123,7 +123,6 @@ export default function SettingsModal({
             style={css('padding:8px 11px; font-size:12px;')}
           >
             <option value="Google">Google</option>
-            <option value="Images">Google Images</option>
             <option value="Bing">Bing</option>
             <option value="DuckDuckGo">DuckDuckGo</option>
             <option value="YouTube">YouTube</option>

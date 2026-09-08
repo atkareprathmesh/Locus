@@ -1,5 +1,5 @@
 export type Priority = 'easy' | 'medium' | 'hard'
-export type Engine = 'Google' | 'Images' | 'Bing' | 'DuckDuckGo' | 'YouTube'
+export type Engine = 'Google' | 'Bing' | 'DuckDuckGo' | 'YouTube'
 export type Filter = 'today' | 'backlog' | 'upcoming' | 'done' | 'all'
 /** Difficulty filter for the to-do list; 'any' disables it. */
 export type PrioFilter = Priority | 'any'
@@ -149,11 +149,6 @@ export interface State extends PageData {
   gappsEdit: boolean
   searchFocus: boolean
   undo: { label: string; snapshot: Partial<State> } | null
-
-  lensImage: string | null
-  lensName: string
-  lensDrag: boolean
-  lensPinned: boolean
 
   bgImage: string | null
   /** How the wallpaper is framed: fill (crop) or fit, plus zoom and pan. */

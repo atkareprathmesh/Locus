@@ -8,7 +8,6 @@ export const FEEDBACK_URL: string = ''
 
 export const ENGINES: Record<Engine, string> = {
   Google: 'https://www.google.com/search?q=',
-  Images: 'https://www.google.com/search?tbm=isch&q=',
   Bing: 'https://www.bing.com/search?q=',
   DuckDuckGo: 'https://duckduckgo.com/?q=',
   YouTube: 'https://www.youtube.com/results?search_query=',
@@ -216,10 +215,6 @@ export function makeInitialState(): State {
     gappsEdit: false,
     searchFocus: false,
     undo: null,
-    lensImage: null,
-    lensName: '',
-    lensDrag: false,
-    lensPinned: false,
     bgImage: null,
     bgFit: 'cover',
     bgZoom: 1,

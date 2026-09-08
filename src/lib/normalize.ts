@@ -164,7 +164,10 @@ export function normalizeLocal(p: any): Partial<State> {
   }
 
   if ('h24' in p) out.h24 = bool(p.h24)
-  if ('engine' in p && ['Google', 'Images', 'Bing', 'DuckDuckGo', 'YouTube'].includes(p.engine)) out.engine = p.engine
+  if ('engine' in p) {
+    const engine = p.engine === 'Images' ? 'Google' : p.engine
+    if (['Google', 'Bing', 'DuckDuckGo', 'YouTube'].includes(engine)) out.engine = engine
+  }
   if ('filter' in p && ['all', 'today', 'upcoming', 'done'].includes(p.filter)) out.filter = p.filter
 
   if (isArr(p.pages) && p.pages.length) {

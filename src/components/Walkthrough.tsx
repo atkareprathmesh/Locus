@@ -29,7 +29,7 @@ const STEPS: Step[] = [
     target: 'search',
     title: 'Search',
     body:
-      'Type and hit Enter to search. Press “/” anywhere to jump here. The dropdown switches engine (Google, Images, Bing, DuckDuckGo, YouTube) — with Images you can paste or drop a picture for a reverse-image search.',
+      'Type and hit Enter to search. Press “/” anywhere to jump here. The dropdown switches engine (Google, Bing, DuckDuckGo, YouTube).',
   },
   {
     target: 'boards',
