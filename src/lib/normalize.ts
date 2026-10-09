@@ -177,6 +177,16 @@ export function normalizeLocal(p: any): Partial<State> {
       .map((pg: any) => ({ id: num(pg.id, nextId()), name: str(pg.name, 'Page') }))
     if (!out.pages.length) out.pages = [{ id: 1, name: 'Home' }]
   }
+  if (isArr(p.deletedPages)) {
+    out.deletedPages = p.deletedPages
+      .filter((entry: any) => isObj(entry) && isObj(entry.page))
+      .map((entry: any) => ({
+        page: { id: num(entry.page.id, nextId()), name: str(entry.page.name, 'Page') },
+        data: normPageData(entry.data),
+        position: Math.max(0, Math.floor(num(entry.position, 0))),
+        deletedAt: Math.max(0, num(entry.deletedAt, Date.now())),
+      }))
+  }
   if (isObj(p.pageData)) {
     const pd: Record<number, PageData> = {}
     for (const [k, v] of Object.entries(p.pageData)) pd[num(k, 0)] = normPageData(v)

@@ -24,6 +24,54 @@ option { background: #161b22; color: #fff; }
 input[type=range] { accent-color: #4c8dff; background: transparent; border: 0; }
 @keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.99); } to { opacity: 1; transform: none; } }
 
+/* Desktop dashboard: notes, habits, and calendar on the left; boards in the
+   middle; tasks and focus timer on the right. The rail wrappers become
+   transparent layout containers so the existing panels can share one grid. */
+@media (min-width: 1101px) {
+  .dashboard-grid {
+    grid-template-rows: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-left,
+  .dashboard-right {
+    display: contents !important;
+  }
+
+  .dashboard-left > [data-tour="notes"] {
+    grid-column: 1;
+    grid-row: 1;
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+  }
+
+  .dashboard-right > [aria-label="Habits summary"] {
+    grid-column: 1;
+    grid-row: 2;
+    min-height: 0;
+  }
+
+  .dashboard-right > [data-tour="calendar"] {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .dashboard-grid > .dashboard-boards {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+  }
+
+  .dashboard-left > [data-tour="tasks"] {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    min-height: 0;
+  }
+
+  .dashboard-right > [aria-label="Pomodoro timer"] {
+    grid-column: 3;
+    grid-row: 3;
+  }
+}
+
 /* Keep the two side rails visually balanced, then stack them before they get cramped. */
 @media (max-width: 1100px) {
   .dashboard-grid {

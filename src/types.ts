@@ -63,6 +63,13 @@ export interface Page {
   name: string
 }
 
+export interface DeletedPage {
+  page: Page
+  data: PageData
+  position: number
+  deletedAt: number
+}
+
 /** Per-page local widget data (everything except Chrome-owned bookmarks). */
 export interface PageData {
   notes: Note[]
@@ -115,6 +122,7 @@ export interface State extends PageData {
   dHabit: string
 
   pages: Page[]
+  deletedPages: DeletedPage[]
   activePage: number
   pageData: Record<number, PageData>
   hoverPage: number | null

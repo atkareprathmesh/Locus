@@ -535,6 +535,11 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setBoardMenu(null)
+        if (showMorningBrief) {
+          setShowMorningBrief(false)
+          const homePage = stateRef.current.pages.find((page) => page.name.trim().toLowerCase() === 'home') || stateRef.current.pages[0]
+          if (homePage && homePage.id !== stateRef.current.activePage) switchPageTo(homePage.id)
+        }
         // The search box takes focus on load so a new tab is type-to-search.
         // Escape steps out of it, which is also what unlocks the single-key
         // shortcuts below.
@@ -609,7 +614,7 @@ export default function App() {
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [set, switchPageTo, newNote, newTask])
+  }, [set, switchPageTo, newNote, newTask, showMorningBrief])
 
   useEffect(() => {
     void readTopSites().then((topSites) => set({ topSites }))
@@ -823,23 +828,58 @@ export default function App() {
     if (s.pages.length < 2) return
     withUndo(
       'Page deleted',
-      ['pages', 'pageData', 'activePage', 'notes', 'tasks', 'habits', 'dateNotes', 'boardPage'],
+      ['pages', 'deletedPages', 'pageData', 'activePage', 'notes', 'tasks', 'habits', 'dateNotes', 'boardPage'],
       (st) => {
         if (st.pages.length < 2) return {}
+        const position = st.pages.findIndex((p) => p.id === id)
+        const page = st.pages.find((p) => p.id === id)
+        if (!page) return {}
         const pages = st.pages.filter((p) => p.id !== id)
         const data = { ...st.pageData }
         if (id !== st.activePage) data[st.activePage] = localSlice(st)
+        const deletedData = id === st.activePage ? localSlice(st) : data[id] ?? emptyLocal()
         delete data[id]
-        // move the deleted page's boards to whichever page is active afterwards
-        const survivor = id === st.activePage ? pages[0].id : st.activePage
-        const boardPage = { ...st.boardPage }
-        for (const k of Object.keys(boardPage)) if (boardPage[k] === id) boardPage[k] = survivor
-        if (id !== st.activePage) return { pages, pageData: data, boardPage }
+        const deletedPages = [
+          ...st.deletedPages.filter((entry) => entry.page.id !== id),
+          { page, data: deletedData, position, deletedAt: Date.now() },
+        ]
+        if (id !== st.activePage) return { pages, deletedPages, pageData: data }
         const next = pages[0]
         const load = data[next.id] ?? emptyLocal()
-        return { pages, pageData: data, boardPage, activePage: next.id, modal: null, dateOpen: null, filter: 'today', ...load }
+        return { pages, deletedPages, pageData: data, activePage: next.id, modal: null, dateOpen: null, filter: 'today', ...load }
       },
     )
+  }
+  const restorePage = (id: number) => {
+    set((st) => {
+      const entry = st.deletedPages.find((item) => item.page.id === id)
+      if (!entry || st.pages.some((page) => page.id === id)) return {}
+      const pages = st.pages.slice()
+      pages.splice(Math.min(entry.position, pages.length), 0, entry.page)
+      return {
+        pages,
+        deletedPages: st.deletedPages.filter((item) => item.page.id !== id),
+        pageData: { ...st.pageData, [id]: entry.data },
+        modal: null,
+      }
+    })
+  }
+  const permanentlyDeletePage = (id: number) => {
+    const entry = s.deletedPages.find((item) => item.page.id === id)
+    if (!entry) return
+    if (!window.confirm(`Permanently delete “${entry.page.name}”? Its notes, tasks, habits, and journal entries cannot be recovered.`)) return
+    set((st) => {
+      const boardPage = { ...st.boardPage }
+      for (const key of Object.keys(boardPage)) if (boardPage[key] === id) boardPage[key] = st.activePage
+      const pageData = { ...st.pageData }
+      delete pageData[id]
+      return {
+        deletedPages: st.deletedPages.filter((item) => item.page.id !== id),
+        pageData,
+        boardPage,
+        modal: null,
+      }
+    })
   }
   const renamePage = (id: number, current: string) => {
     const name = window.prompt('Rename page', current)
@@ -883,6 +923,7 @@ export default function App() {
     { icon: 'explore', label: 'Daily Compass', onClick: () => (profileName ? setShowMorningBrief(true) : setShowOnboarding(true)) },
     { icon: 'history', label: 'History', onClick: () => void openHistory() },
     { icon: 'settings', label: 'Settings', onClick: () => openModal('settings') },
+    { icon: 'delete_outline', label: 'Recycle bin', onClick: () => openModal('recycle') },
   ]
 
   // ---- derived --------------------------------------------------------
@@ -1082,7 +1123,7 @@ export default function App() {
     }))
     .filter((g) => g.items.length)
 
-  const wide = ['habits', 'bmsearch', 'settings', 'import', 'note', 'todo', 'histpage'].includes(s.modal || '')
+  const wide = ['habits', 'bmsearch', 'settings', 'import', 'note', 'todo', 'histpage', 'recycle'].includes(s.modal || '')
   const titles: Record<string, string> = {
     note: 'Note',
     todo: 'To-do list',
@@ -1095,6 +1136,7 @@ export default function App() {
     settings: 'Settings',
     histpage: 'History',
     clearhistory: 'Clear history',
+    recycle: 'Recycle bin',
     shortcuts: 'Keyboard shortcuts',
   }
 
@@ -1106,6 +1148,7 @@ export default function App() {
       habits: s.habits,
       dateNotes: s.dateNotes,
       pages: s.pages,
+      deletedPages: s.deletedPages,
       pageData: s.pageData,
       boards: s.boards,
     }
@@ -1636,7 +1679,7 @@ export default function App() {
             <div
               data-tour="notes"
               style={css(
-                'flex: 0 0 ' + s.notesPanelHeight + '%; min-height: 0; background: rgba(9,13,20,.34); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.1); border-radius: 18px; box-shadow: 0 8px 30px rgba(0,0,0,.26); padding: clamp(12px,1.6vh,16px); display: flex; flex-direction: column; gap: 10px; overflow: hidden',
+                'flex: 0 0 ' + s.notesPanelHeight + '%; min-height: 0; background: rgba(9,13,20,.34); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.16); border-radius: 18px; box-shadow: 0 8px 32px rgba(0,0,0,.3); padding: clamp(11px,1.5vh,16px); display: flex; flex-direction: column; gap: 10px; overflow: hidden',
               )}
             >
               <div style={css('display:flex; align-items:center; justify-content:space-between; flex-shrink:0;')}>
@@ -1647,17 +1690,6 @@ export default function App() {
                   <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Quick Notes</span>
                 </div>
                 <div style={css('display:flex; align-items:center; gap:7px;')}>
-                  <input
-                    type="range"
-                    min="28"
-                    max="72"
-                    step="2"
-                    value={s.notesPanelHeight}
-                    aria-label="Quick Notes panel size"
-                    title="Resize Quick Notes"
-                    onChange={(e) => set({ notesPanelHeight: Number(e.target.value) })}
-                    style={css('width:58px; height:12px; accent-color:#6ea0ff; cursor:ew-resize;')}
-                  />
                   <Box
                     onClick={newNote}
                     title="New note (n)"
@@ -2028,28 +2060,34 @@ export default function App() {
                 'flex-shrink:0; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(11px,1.5vh,16px);',
               )}
             >
-              <div style={css('display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;')}>
-                <Box
-                  onClick={() => set({ monthOffset: s.monthOffset - 1 })}
-                  sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.5); cursor:pointer;"
-                  hover="background:rgba(255,255,255,.1); color:#fff"
-                >
-                  <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px;")}>chevron_left</span>
-                </Box>
-                <div style={css('font-size:clamp(11.5px,1.5vh,13.5px); font-weight:600;')}>
-                  {base.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
+              <div style={css('display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px;')}>
+                <div style={css('display:flex; align-items:center; gap:8px; min-width:0;')}>
+                  <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:19px; color:rgba(255,255,255,.52);")}>calendar_month</span>
+                  <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600; color:rgba(255,255,255,.88);')}>Calendar</span>
                 </div>
-                <div style={css('display:flex; align-items:center; gap:2px;')}>
+                <div style={css('display:flex; align-items:center; justify-content:space-between; gap:2px; width:min(190px,58%); min-width:112px; padding:2px; border-radius:9px; background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.08);')}>
+                  <Box
+                    onClick={() => set({ monthOffset: s.monthOffset - 1 })}
+                    aria-label="Previous month"
+                    sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.5); cursor:pointer; flex-shrink:0;"
+                    hover="background:rgba(255,255,255,.1); color:#fff"
+                  >
+                    <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px;")}>chevron_left</span>
+                  </Box>
+                  <div style={css('font-size:clamp(10.5px,1.4vh,12.5px); font-weight:600; color:rgba(255,255,255,.68); white-space:nowrap; text-align:center;')}>
+                    {base.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
+                  </div>
                   <Box
                     onClick={() => set({ monthOffset: s.monthOffset + 1 })}
-                    sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.5); cursor:pointer;"
+                    aria-label="Next month"
+                    sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.5); cursor:pointer; flex-shrink:0;"
                     hover="background:rgba(255,255,255,.1); color:#fff"
                   >
                     <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px;")}>chevron_right</span>
                   </Box>
                 </div>
               </div>
-              <div style={css('display:grid; grid-template-columns:repeat(7,1fr); gap:2px;')}>
+              <div style={css('display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); column-gap:2px; row-gap:2px;')}>
                 {['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'].map((w) => (
                   <div key={w} style={css('font-size:8.5px; font-weight:600; letter-spacing:.08em; color:rgba(255,255,255,.3); text-align:center; padding-bottom:4px;')}>
                     {w}
@@ -2064,16 +2102,20 @@ export default function App() {
                         : undefined
                     }
                     style={{
-                      fontSize: 'clamp(9.5px,1.25vh,11.5px)',
+                      fontSize: 'clamp(10px,1.3vh,12px)',
                       textAlign: 'center',
-                      padding: '5px 0',
+                      padding: '0',
+                      minHeight: 29,
                       borderRadius: 8,
                       fontVariantNumeric: 'tabular-nums',
                       position: 'relative',
                       cursor: d.dayIso ? 'pointer' : 'default',
                       background: d.today ? '#4c8dff' : 'transparent',
-                      color: d.today ? '#fff' : 'rgba(255,255,255,.62)',
+                      color: d.today ? '#fff' : d.dayIso ? 'rgba(255,255,255,.62)' : 'rgba(255,255,255,.34)',
                       fontWeight: d.today ? 700 : 500,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
                     }}
                   >
                     {d.label}
@@ -2105,7 +2147,7 @@ export default function App() {
                 'flex:0 0 auto; min-height:0; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(11px,1.5vh,16px); display:flex; flex-direction:column; gap:10px;',
               )}
             >
-              <div style={css('display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-shrink:0;')}>
+              <div style={css('display:flex; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0;')}>
                 <div style={css('display:flex; align-items:center; gap:10px; min-width:0;')}>
                   <Box
                     onClick={() => openModal('habits')}
@@ -2116,10 +2158,7 @@ export default function App() {
                   >
                     repeat
                   </Box>
-                  <div style={css('display:flex; flex-direction:column; gap:2px; min-width:0;')}>
-                    <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Habits</span>
-                    <span style={css('font-size:10px; color:rgba(255,255,255,.4);')}>Small steps. Big changes.</span>
-                  </div>
+                  <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600; color:rgba(255,255,255,.88);')}>Habits</span>
                 </div>
                 <div style={css('display:flex; align-items:center; gap:2px; flex-shrink:0; background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.08); border-radius:9px; padding:2px;')}>
                   <Box
@@ -2754,6 +2793,52 @@ export default function App() {
                 </div>
               }
             >
+            {s.modal === 'recycle' && (
+              <div style={css('display:flex; flex-direction:column; gap:12px;')}>
+                <div style={css('font-size:11.5px; line-height:1.55; color:rgba(255,255,255,.46);')}>
+                  Deleted pages keep their notes, tasks, habits, journal entries, and board assignments here until you restore them.
+                </div>
+                {s.deletedPages.length === 0 ? (
+                  <div style={css('padding:24px 12px; text-align:center; border:1px dashed rgba(255,255,255,.14); border-radius:12px; font-size:12px; color:rgba(255,255,255,.38);')}>
+                    The recycle bin is empty.
+                  </div>
+                ) : (
+                  <div style={css('display:flex; flex-direction:column; gap:7px; max-height:52vh; overflow-y:auto;')}>
+                    {s.deletedPages
+                      .slice()
+                      .sort((a, b) => b.deletedAt - a.deletedAt)
+                      .map((entry) => (
+                        <div key={entry.page.id} style={css('display:flex; align-items:center; gap:10px; padding:10px 11px; border-radius:11px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.07);')}>
+                          <span style={css("font-family:'Material Symbols Rounded'; font-size:18px; line-height:1; color:rgba(255,255,255,.4); flex-shrink:0;")}>description</span>
+                          <div style={css('flex:1; min-width:0;')}>
+                            <div style={css('font-size:12.5px; font-weight:600; color:rgba(255,255,255,.82); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;')}>{entry.page.name}</div>
+                            <div style={css('margin-top:3px; font-size:10px; color:rgba(255,255,255,.34);')}>Deleted {new Date(entry.deletedAt).toLocaleDateString()}</div>
+                          </div>
+                          <div style={css('display:flex; align-items:center; gap:5px; flex-shrink:0;')}>
+                            <Box
+                              onClick={() => restorePage(entry.page.id)}
+                              sx="border:1px solid rgba(130,175,255,.28); border-radius:8px; padding:6px 9px; font-size:10.5px; font-weight:600; color:rgba(160,195,255,.9); cursor:pointer; white-space:nowrap;"
+                              hover="background:rgba(76,141,255,.16); color:#fff"
+                            >
+                              Restore
+                            </Box>
+                            <Box
+                              onClick={() => permanentlyDeletePage(entry.page.id)}
+                              aria-label={`Permanently delete ${entry.page.name}`}
+                              title="Permanently delete"
+                              sx="width:26px; height:26px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-family:'Material Symbols Rounded'; line-height:1; font-size:15px; color:rgba(255,150,140,.65); cursor:pointer;"
+                              hover="background:rgba(248,113,113,.14); color:rgba(255,175,165,.98)"
+                            >
+                              delete
+                            </Box>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {s.modal === 'note' && (
               <div style={css('display:flex; flex-direction:column; gap:14px;')}>
                 <input
@@ -3181,6 +3266,7 @@ export default function App() {
                     filter: 'today',
                     pageData: {},
                     pages: [{ id: 1, name: 'Home' }],
+                    deletedPages: [],
                     activePage: 1,
                   })
                 }

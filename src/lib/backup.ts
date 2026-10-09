@@ -15,6 +15,7 @@ export function backupPayload(s: State) {
     habits: s.habits,
     dateNotes: s.dateNotes,
     pages: s.pages,
+    deletedPages: s.deletedPages,
     activePage: s.activePage,
     pageData: s.pageData,
     boards: s.boards,
