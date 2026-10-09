@@ -48,6 +48,7 @@ function normTask(t: any): Task | null {
     time: str(t.time),
     priority,
     completed: bool(t.completed),
+    completedAt: /^\d{4}-\d{2}-\d{2}$/.test(str(t.completedAt)) ? str(t.completedAt) : undefined,
     remind: REMINDS.includes(str(t.remind)) ? str(t.remind) : 'none',
     subs: isArr(t.subs)
       ? t.subs

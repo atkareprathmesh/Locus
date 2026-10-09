@@ -5,6 +5,8 @@ import TodoCard, { PRIO_META, inBucket } from './components/TodoCard'
 import { BmRow } from './components/BmRow'
 import { Clock } from './components/Clock'
 import { Favicon } from './components/Favicon'
+import { MorningBrief } from './components/MorningBrief'
+import { Onboarding } from './components/Onboarding'
 import { GappIcon } from './components/GappIcon'
 import { DEFAULT_BG, Wallpaper, WallpaperAdjust, type BgTransform } from './components/Wallpaper'
 import { css } from './lib/css'
@@ -29,7 +31,6 @@ import {
 } from './chrome/bookmarks'
 import { clearHistory, recentHistory } from './chrome/history'
 import { topSites as readTopSites } from './chrome/topsites'
-import { openIncognito } from './chrome/windows'
 import {
   CATS,
   DEFAULT_GAPPS,
@@ -40,6 +41,7 @@ import {
   emptyLocal,
   gappByKey,
   iso,
+  isoShift,
   makeInitialState,
   reducer,
   stamp,
@@ -59,6 +61,36 @@ const LOCAL_KEY = 'locus.v1'
 const DEV_BOARDS_KEY = 'locus.devBoards'
 const ONBOARD_KEY = 'locus.onboarded'
 const JOURNAL_DRAFT_KEY = 'locus.journalDraft'
+const PROFILE_KEY = 'locus.profile'
+const BRIEF_KEY = 'locus.morningBrief'
+const NOTIFICATION_ASKED_KEY = 'locus.notificationAsked'
+
+const DAILY_QUOTES = {
+  celebrate: [
+    'Consistency is quiet proof that you can trust yourself.',
+    'You kept a promise to yourself yesterday. Carry that strength forward.',
+  ],
+  reset: [
+    'Today is not a verdict on yesterday. It is another chance to choose.',
+    'Begin with one honest step. Momentum can meet you there.',
+  ],
+  heavy: [
+    'A full day does not need a perfect beginning. Start with what matters most.',
+    'Make the important thing smaller, then make it real.',
+  ],
+  steady: [
+    'A little attention, given daily, becomes a life that feels intentional.',
+    'You do not need to do everything today. You only need to begin well.',
+  ],
+} as const
+
+function dailyQuote(done: number, total: number, todayCount: number, day: string): string {
+  const key = total > 0 && done / total >= 0.8 ? 'celebrate' : total > 0 && done / total < 0.4 ? 'reset' : todayCount >= 6 ? 'heavy' : 'steady'
+  const choices = DAILY_QUOTES[key]
+  let hash = 0
+  for (const char of day) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
+  return choices[hash % choices.length]
+}
 
 /** Pre-rename key names, carried over on first boot after the Jarvis → Locus rename. */
 const LEGACY_KEYS: [string, string][] = [
@@ -136,11 +168,38 @@ type PomodoroState = {
   mode: PomodoroMode
   secondsLeft: number
   running: boolean
+  /** Absolute timestamp when the current phase ends. Shared across tabs. */
+  endAt: number | null
 }
 
 const POMODORO_DEFAULTS = { workMinutes: 25, breakMinutes: 5 }
+const POMODORO_KEY = 'locus.pomodoro'
 
 const formatPomodoro = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+
+/** Rebuild the timer from its wall-clock deadline, including phases elapsed while this tab was closed. */
+function resolvePomodoro(timer: PomodoroState, now = Date.now()): PomodoroState {
+  if (!timer.running || timer.endAt == null) return timer
+
+  let mode = timer.mode
+  let endAt = timer.endAt
+  let transitions = 0
+  while (endAt <= now && transitions < 100) {
+    mode = mode === 'work' ? 'break' : 'work'
+    endAt += (mode === 'work' ? timer.workMinutes : timer.breakMinutes) * 60 * 1000
+    transitions += 1
+    if (timer.workMinutes === 0 && timer.breakMinutes === 0) {
+      return { ...timer, secondsLeft: 0, running: false, endAt: null }
+    }
+  }
+
+  return {
+    ...timer,
+    mode,
+    endAt,
+    secondsLeft: Math.max(1, Math.ceil((endAt - now) / 1000)),
+  }
+}
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, undefined, makeInitialState)
@@ -153,46 +212,92 @@ export default function App() {
   )
 
   const [showTour, setShowTour] = useState(false)
+  const [profileName, setProfileName] = useState('')
+  const [showOnboarding, setShowOnboarding] = useState(false)
+  const [showMorningBrief, setShowMorningBrief] = useState(false)
   const [boardMenu, setBoardMenu] = useState<string | null>(null)
+  const [boardActionMenu, setBoardActionMenu] = useState<string | null>(null)
+  const [editingBoardId, setEditingBoardId] = useState<string | null>(null)
+  const [dragDateNote, setDragDateNote] = useState<number | null>(null)
+  const [dragOverDateNote, setDragOverDateNote] = useState<number | null>(null)
+  const [habitWeekOffset, setHabitWeekOffset] = useState(0)
   const [pomodoroSettingsOpen, setPomodoroSettingsOpen] = useState(false)
+  const [pomodoroDrafts, setPomodoroDrafts] = useState({ workMinutes: String(POMODORO_DEFAULTS.workMinutes), breakMinutes: String(POMODORO_DEFAULTS.breakMinutes) })
   const [pomodoro, setPomodoro] = useState<PomodoroState>({
     ...POMODORO_DEFAULTS,
     mode: 'work',
     secondsLeft: POMODORO_DEFAULTS.workMinutes * 60,
     running: false,
+    endAt: null,
   })
+  const pomodoroHydrated = useRef(false)
+
+  // The deadline is stored in shared extension storage, not just in this tab's
+  // React state. This lets a fresh new-tab page recover the same session.
+  useEffect(() => {
+    let alive = true
+    const hydratePomodoro = async () => {
+      const saved = await store.get<Partial<PomodoroState>>(POMODORO_KEY)
+      if (!alive) return
+      if (saved) {
+        const workMinutes = Number.isInteger(Number(saved.workMinutes)) ? Math.max(0, Math.min(1440, Number(saved.workMinutes))) : POMODORO_DEFAULTS.workMinutes
+        const breakMinutes = Number.isInteger(Number(saved.breakMinutes)) ? Math.max(0, Math.min(1440, Number(saved.breakMinutes))) : POMODORO_DEFAULTS.breakMinutes
+        const restored: PomodoroState = {
+          workMinutes,
+          breakMinutes,
+          mode: saved.mode === 'break' ? 'break' : 'work',
+          secondsLeft: Math.max(0, Number.isFinite(Number(saved.secondsLeft)) ? Number(saved.secondsLeft) : workMinutes * 60),
+          running: saved.running === true,
+          endAt: Number.isFinite(Number(saved.endAt)) ? Number(saved.endAt) : null,
+        }
+        setPomodoro(resolvePomodoro(restored))
+      }
+      pomodoroHydrated.current = true
+    }
+
+    void hydratePomodoro()
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void hydratePomodoro()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      alive = false
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [])
+
+  // Persist only meaningful timer transitions. The ticking display itself is
+  // derived locally from endAt, so we do not write to storage every second.
+  useEffect(() => {
+    if (!pomodoroHydrated.current) return
+    void store.set(POMODORO_KEY, pomodoro)
+  }, [pomodoro.workMinutes, pomodoro.breakMinutes, pomodoro.mode, pomodoro.running, pomodoro.endAt])
 
   useEffect(() => {
     if (!pomodoro.running) return
     const timer = window.setInterval(() => {
-      setPomodoro((current) => {
-        if (current.secondsLeft > 1) return { ...current, secondsLeft: current.secondsLeft - 1 }
-        const nextMode: PomodoroMode = current.mode === 'work' ? 'break' : 'work'
-        return {
-          ...current,
-          mode: nextMode,
-          secondsLeft: (nextMode === 'work' ? current.workMinutes : current.breakMinutes) * 60,
-        }
-      })
+      setPomodoro((current) => resolvePomodoro(current))
     }, 1000)
     return () => window.clearInterval(timer)
   }, [pomodoro.running])
 
   const resetPomodoro = useCallback(() => {
-    setPomodoro((current) => ({ ...current, mode: 'work', secondsLeft: current.workMinutes * 60, running: false }))
+    setPomodoro((current) => ({ ...current, mode: 'work', secondsLeft: current.workMinutes * 60, running: false, endAt: null }))
   }, [])
 
   const updatePomodoroDuration = useCallback((key: 'workMinutes' | 'breakMinutes', value: number) => {
-    const minutes = Math.max(1, Math.min(90, Math.round(value) || 1))
+    const minutes = Math.max(0, Math.min(1440, Math.trunc(value)))
     setPomodoro((current) => ({
       ...current,
       [key]: minutes,
       secondsLeft: current.mode === (key === 'workMinutes' ? 'work' : 'break') ? minutes * 60 : current.secondsLeft,
       running: false,
+      endAt: null,
     }))
   }, [])
 
   const searchRef = useRef<HTMLInputElement>(null)
+  const bookmarkSearchRef = useRef<HTMLInputElement>(null)
   const [googleSuggestions, setGoogleSuggestions] = useState<string[]>([])
   const journalRef = useRef<HTMLTextAreaElement>(null)
   const journalEditorRef = useRef<HTMLDivElement>(null)
@@ -201,6 +306,12 @@ export default function App() {
   const loaded = useRef(false)
   const stateRef = useRef(state)
   stateRef.current = state
+
+  useEffect(() => {
+    if (s.modal !== 'bmsearch') return
+    const frame = window.requestAnimationFrame(() => bookmarkSearchRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [s.modal])
 
   const switchPageTo = useCallback(
     (id: number) =>
@@ -244,8 +355,10 @@ export default function App() {
       await migrateKeys(LEGACY_KEYS)
       const saved = await store.get<Partial<State>>(LOCAL_KEY)
       const bg = await store.get<string>(BG_KEY)
+      const profile = await store.get<{ name?: string }>(PROFILE_KEY)
       if (!alive) return
       if (saved) set(normalizeLocal(saved))
+      if (profile?.name?.trim()) setProfileName(profile.name.trim())
       if (typeof bg === 'string' && bg.startsWith('data:')) set({ bgImage: bg })
 
       if (hasBookmarks) {
@@ -260,8 +373,16 @@ export default function App() {
       // user gets the boards empty state instead, which offers to build one
       // from their own most-visited sites. Runs once, guarded by ONBOARD_KEY.
       const onboarded = await store.get<boolean>(ONBOARD_KEY)
+      const briefState = await store.get<{ lastShown?: string }>(BRIEF_KEY)
+      const today = iso(new Date())
       if (!alive) return
-      if (!onboarded) {
+      if (!profile?.name?.trim()) {
+        setShowOnboarding(true)
+      } else if (briefState?.lastShown !== today) {
+        await store.set(BRIEF_KEY, { lastShown: today })
+        setShowMorningBrief(true)
+      }
+      if (!onboarded && profile?.name?.trim()) {
         await store.set(ONBOARD_KEY, true)
         if (alive) setShowTour(true)
       }
@@ -588,12 +709,11 @@ export default function App() {
       delete boardPage[id]
       return { boards: st.boards.filter((b) => b.id !== id), boardPage }
     })
-  const renameBoardH = (id: string, current: string) => {
-    if (id === '1') return // synthetic "Bookmarks Bar" board
-    const name = window.prompt('Rename board', current)
-    if (!name || !name.trim() || name.trim() === current) return
-    if (hasBookmarks) void renameBoard(id, name.trim())
-    else set((st) => ({ boards: st.boards.map((b) => (b.id === id ? { ...b, name: name.trim() } : b)) }))
+  const renameBoardName = async (id: string, name: string) => {
+    const next = name.trim()
+    if (!next) return
+    if (hasBookmarks) await renameBoard(id, next)
+    else set((st) => ({ boards: st.boards.map((b) => (b.id === id ? { ...b, name: next } : b)) }))
   }
   const reorderBoards = (fromId: string, toId: string) =>
     set((st) => {
@@ -738,8 +858,10 @@ export default function App() {
 
   // ---- modal open helpers ------------------------------------------
   const openModal = (modal: string, extra: Partial<State> = {}) => set({ modal, ...extra })
-  const closeModal = () =>
+  const closeModal = () => {
+    setEditingBoardId(null)
     set({ modal: null, importPreview: false, importError: '', bmReturn: false, dBmId: '', dBmOrigBoard: '' })
+  }
 
   const openHistory = async () => {
     openModal('histpage')
@@ -750,7 +872,6 @@ export default function App() {
   const tools = [
     { icon: 'bookmarks', label: 'Search bookmarks', onClick: () => openModal('bmsearch', { bmQuery: '' }) },
     { icon: 'swap_vert', label: 'Import / export', onClick: () => openModal('import', { importPreview: false, importError: '' }) },
-    { icon: 'shield', label: 'Privacy mode', onClick: () => openModal('privacy') },
     {
       icon: 'open_in_full',
       label: 'Fullscreen',
@@ -759,7 +880,7 @@ export default function App() {
         else void document.documentElement.requestFullscreen?.()
       },
     },
-    { icon: 'repeat', label: 'Habits', onClick: () => openModal('habits') },
+    { icon: 'explore', label: 'Daily Compass', onClick: () => (profileName ? setShowMorningBrief(true) : setShowOnboarding(true)) },
     { icon: 'history', label: 'History', onClick: () => void openHistory() },
     { icon: 'settings', label: 'Settings', onClick: () => openModal('settings') },
   ]
@@ -774,6 +895,33 @@ export default function App() {
     return d
   }, [])
   const todayIso = iso(today)
+  const yesterdayIso = isoShift(today, 1)
+  const briefTasks = s.tasks.filter((task) => task.due === todayIso)
+  const yesterdayPendingTasks = s.tasks.filter((task) => task.due === yesterdayIso && !task.completed)
+  const briefHabits = s.habits.filter((habit) => !habit.done.includes(todayIso))
+  const yesterdayTasks = s.tasks.filter((task) => task.due === yesterdayIso)
+  const yesterdayDoneTasks = s.tasks.filter((task) => task.completedAt === yesterdayIso).length
+  const yesterdayDoneHabits = s.habits.filter((habit) => habit.done.includes(yesterdayIso)).length
+  const yesterdayTotal = yesterdayTasks.length + s.habits.length
+  const yesterdayDone = yesterdayDoneTasks + yesterdayDoneHabits
+  const morningQuote = dailyQuote(yesterdayDone, yesterdayTotal, briefTasks.length + briefHabits.length, todayIso)
+  const weekStart = new Date(today)
+  weekStart.setDate(today.getDate() - today.getDay() + habitWeekOffset * 7)
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const date = new Date(weekStart)
+    date.setDate(weekStart.getDate() + i)
+    const dayIso = iso(date)
+    return {
+      iso: dayIso,
+      label: date.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase(),
+      day: date.getDate(),
+      isToday: dayIso === todayIso,
+      future: dayIso > todayIso,
+    }
+  })
+  const weekLabel = habitWeekOffset === 0
+    ? 'This week'
+    : `${weekDays[0].day} ${weekDays[0].label} – ${weekDays[6].day} ${weekDays[6].label}`
 
   // calendar
   const base = new Date(today.getFullYear(), today.getMonth() + s.monthOffset, 1)
@@ -808,7 +956,41 @@ export default function App() {
   const clock = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
   const toggleTask = (id: number) =>
-    set((st) => ({ tasks: st.tasks.map((x) => (x.id === id ? { ...x, completed: !x.completed } : x)) }))
+    set((st) => ({
+      tasks: st.tasks.map((x) =>
+        x.id === id
+          ? { ...x, completed: !x.completed, completedAt: !x.completed ? iso(new Date()) : undefined }
+          : x,
+      ),
+    }))
+
+  const completeOnboarding = async (name: string, enableNotifications: boolean) => {
+    const clean = name.trim()
+    let permission = 'unsupported'
+    let permissionRequest: Promise<NotificationPermission> | null = null
+    try {
+      if (!enableNotifications) {
+        permission = 'skipped'
+      } else {
+      if (typeof Notification !== 'undefined') {
+        permission = Notification.permission
+        if (permission === 'default') permissionRequest = Notification.requestPermission()
+      }
+      }
+    } catch {
+      permission = 'unavailable'
+    }
+    await store.set(PROFILE_KEY, { name: clean, createdAt: Date.now() })
+    await store.set(ONBOARD_KEY, true)
+    if (permissionRequest) permission = await permissionRequest
+    await store.set(NOTIFICATION_ASKED_KEY, { at: Date.now(), permission })
+    await store.set(BRIEF_KEY, { lastShown: iso(new Date()) })
+    setProfileName(clean)
+    setShowOnboarding(false)
+    setShowMorningBrief(true)
+  }
+
+  const closeMorningBrief = () => setShowMorningBrief(false)
 
   // notes
   const noteTitle = (n: { title: string; text: string }) =>
@@ -905,14 +1087,13 @@ export default function App() {
     note: 'Note',
     todo: 'To-do list',
     task: 'New task',
-    board: 'New board',
+    board: editingBoardId ? 'Rename board' : 'New board',
     bookmark: 'Add bookmark',
     bmsearch: 'Search bookmarks',
     habits: 'Habits',
     import: 'Import / export',
     settings: 'Settings',
     histpage: 'History',
-    privacy: 'Privacy mode',
     clearhistory: 'Clear history',
     shortcuts: 'Keyboard shortcuts',
   }
@@ -1005,7 +1186,6 @@ export default function App() {
     }
   }
 
-  const [incognitoHint, setIncognitoHint] = useState('')
 
   // Empty-state shortcut: turn a few most-visited sites into a starter board.
   const [pickedSites, setPickedSites] = useState<string[]>([])
@@ -1694,12 +1874,8 @@ export default function App() {
                     </span>
                     <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: dotFor(b.id, i) }} />
                     <div
-                      onDoubleClick={() => renameBoardH(b.id, b.name)}
-                      title={b.id === '1' ? '' : 'Double-click to rename'}
                       style={css(
-                        'flex:1; min-width:0; font-size:clamp(11.5px,1.5vh,13.5px); font-weight:600; color:rgba(255,255,255,.92); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:' +
-                          (b.id === '1' ? 'default' : 'text') +
-                          ';',
+                        'flex:1; min-width:0; font-size:clamp(11.5px,1.5vh,13.5px); font-weight:600; color:rgba(255,255,255,.92); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
                       )}
                     >
                       {b.name}
@@ -1711,6 +1887,50 @@ export default function App() {
                     >
                       {b.bookmarks.length}
                     </div>
+                    {b.id !== '1' && (
+                      <div style={css('position:relative; flex-shrink:0;')}>
+                        <Box
+                          onClick={() => setBoardActionMenu(boardActionMenu === b.id ? null : b.id)}
+                          title="Edit board"
+                          aria-label={`Edit ${b.name}`}
+                          sx="font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(255,255,255,.32); cursor:pointer;"
+                          hover="color:rgba(150,185,255,.95)"
+                        >
+                          more_vert
+                        </Box>
+                        {boardActionMenu === b.id && (
+                          <div
+                            style={css(
+                              'position:absolute; right:0; top:24px; z-index:30; background:rgba(20,25,34,.99); border:1px solid rgba(255,255,255,.14); border-radius:10px; padding:5px; min-width:120px; box-shadow:0 14px 40px rgba(0,0,0,.5);',
+                            )}
+                          >
+                            <Box
+                              onClick={() => {
+                                setBoardActionMenu(null)
+                                setEditingBoardId(b.id)
+                                openModal('board', { dBoardName: b.name, bmReturn: false })
+                              }}
+                              sx="display:flex; align-items:center; gap:7px; border-radius:7px; padding:8px; font-size:12px; color:rgba(255,255,255,.82); cursor:pointer;"
+                              hover="background:rgba(255,255,255,.08)"
+                            >
+                              <span style={css("font-family:'Material Symbols Rounded'; font-size:14px; line-height:1;")}>edit</span>
+                              Rename
+                            </Box>
+                            <Box
+                              onClick={() => {
+                                setBoardActionMenu(null)
+                                deleteBoard(b.id)
+                              }}
+                              sx="display:flex; align-items:center; gap:7px; border-radius:7px; padding:8px; font-size:12px; color:rgba(255,150,140,.9); cursor:pointer;"
+                              hover="background:rgba(255,255,255,.08)"
+                            >
+                              <span style={css("font-family:'Material Symbols Rounded'; font-size:14px; line-height:1;")}>delete_outline</span>
+                              Delete
+                            </Box>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {s.pages.length > 1 && (
                       <div style={css('position:relative; flex-shrink:0;')}>
                         <Box
@@ -1757,14 +1977,6 @@ export default function App() {
                         )}
                       </div>
                     )}
-                    <Box
-                      onClick={() => deleteBoard(b.id)}
-                      title="Delete board"
-                      sx="font-family:'Material Symbols Rounded'; line-height:1; font-size:17px; color:rgba(255,255,255,.32); cursor:pointer; flex-shrink:0;"
-                      hover="color:rgba(255,140,130,.95)"
-                    >
-                      delete_outline
-                    </Box>
                   </div>
                   <div style={css('flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:1px; padding-right:2px;')}>
                     {b.bookmarks.map((bm) => (
@@ -1804,7 +2016,12 @@ export default function App() {
           </div>
 
           {/* Right rail */}
-          <div className="dashboard-right" style={css('display:flex; flex-direction:column; gap:clamp(10px,1.2vh,16px); min-height:0;')}>
+          <div
+            className="dashboard-right"
+            style={css(
+              'height:100%; min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:clamp(10px,1.2vh,16px);',
+            )}
+          >
             <div
               data-tour="calendar"
               style={css(
@@ -1829,14 +2046,6 @@ export default function App() {
                     hover="background:rgba(255,255,255,.1); color:#fff"
                   >
                     <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:17px;")}>chevron_right</span>
-                  </Box>
-                  <Box
-                    onClick={() => openModal('habits')}
-                    title="Habit tracker"
-                    sx="width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.42); cursor:pointer;"
-                    hover="background:rgba(255,255,255,.1); color:rgba(124,160,255,.95)"
-                  >
-                    <span style={css("font-family:'Material Symbols Rounded'; line-height:1; font-size:15px;")}>repeat</span>
                   </Box>
                 </div>
               </div>
@@ -1891,9 +2100,106 @@ export default function App() {
             </div>
 
             <div
+              aria-label="Habits summary"
+              style={css(
+                'flex:0 0 auto; min-height:0; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(11px,1.5vh,16px); display:flex; flex-direction:column; gap:10px;',
+              )}
+            >
+              <div style={css('display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-shrink:0;')}>
+                <div style={css('display:flex; align-items:center; gap:10px; min-width:0;')}>
+                  <Box
+                    onClick={() => openModal('habits')}
+                    title="Open full habit history"
+                    aria-label="Open full habit history"
+                    sx="width:24px; height:24px; border-radius:7px; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-family:'Material Symbols Rounded'; line-height:1; font-size:19px; color:rgba(255,255,255,.52); cursor:pointer;"
+                    hover="background:rgba(255,255,255,.1); color:#fff"
+                  >
+                    repeat
+                  </Box>
+                  <div style={css('display:flex; flex-direction:column; gap:2px; min-width:0;')}>
+                    <span style={css('font-size:clamp(12px,1.6vh,14px); font-weight:600;')}>Habits</span>
+                    <span style={css('font-size:10px; color:rgba(255,255,255,.4);')}>Small steps. Big changes.</span>
+                  </div>
+                </div>
+                <div style={css('display:flex; align-items:center; gap:2px; flex-shrink:0; background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.08); border-radius:9px; padding:2px;')}>
+                  <Box
+                    onClick={() => setHabitWeekOffset((offset) => offset - 1)}
+                    aria-label="Previous habit week"
+                    sx="width:21px; height:21px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-family:'Material Symbols Rounded'; line-height:1; font-size:15px; color:rgba(255,255,255,.42); cursor:pointer;"
+                    hover="background:rgba(255,255,255,.1); color:#fff"
+                  >
+                    chevron_left
+                  </Box>
+                  <span style={css('min-width:58px; text-align:center; font-size:9.5px; font-weight:600; color:rgba(255,255,255,.52);')}>{weekLabel}</span>
+                  <Box
+                    onClick={() => setHabitWeekOffset((offset) => offset + 1)}
+                    aria-label="Next habit week"
+                    sx="width:21px; height:21px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-family:'Material Symbols Rounded'; line-height:1; font-size:15px; color:rgba(255,255,255,.42); cursor:pointer;"
+                    hover="background:rgba(255,255,255,.1); color:#fff"
+                  >
+                    chevron_right
+                  </Box>
+                </div>
+              </div>
+
+              {s.habits.length > 0 ? (
+                <div style={css('display:flex; flex-direction:column; gap:6px; overflow-x:auto; padding-bottom:2px;')}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(80px,1fr) repeat(7,18px)', gap: 5, alignItems: 'center' }}>
+                    <div />
+                    {weekDays.map((day) => (
+                      <div key={day.iso} style={{ textAlign: 'center', fontSize: 8.5, lineHeight: 1.2, color: day.isToday ? 'rgba(130,175,255,.98)' : 'rgba(255,255,255,.34)', fontWeight: day.isToday ? 700 : 600 }}>
+                        <div style={{ textTransform: 'uppercase' }}>{day.label}</div>
+                        <div style={{ marginTop: 2, fontSize: 8, color: day.isToday ? 'rgba(130,175,255,.9)' : 'rgba(255,255,255,.24)' }}>{day.day}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={css('display:flex; flex-direction:column; gap:6px; max-height:156px; overflow-y:auto;')}>
+                    {s.habits.map((h) => (
+                      <div key={h.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(80px,1fr) repeat(7,18px)', gap: 5, alignItems: 'center', padding: '2px 0' }}>
+                        <div style={css('min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10.5px; color:rgba(255,255,255,.78); background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.07); border-radius:8px; padding:7px 8px;')} title={h.name}>
+                          {h.name}
+                        </div>
+                        {weekDays.map((day) => {
+                          const done = h.done.includes(day.iso)
+                          return (
+                            <Box
+                              key={day.iso}
+                              onClick={() => !day.future && toggleHabitDay(h.id, day.iso)}
+                              aria-label={`${done ? 'Unmark' : 'Mark'} ${h.name} ${day.iso}`}
+                              title={day.iso}
+                              sx={
+                                "width:18px; height:18px; border-radius:5px; display:flex; align-items:center; justify-content:center; box-sizing:border-box; font-family:'Material Symbols Rounded'; line-height:1; font-size:10px; cursor:" +
+                                (day.future ? 'default' : 'pointer') +
+                                '; ' +
+                                (done
+                                  ? 'background:rgba(76,141,255,.9); border:1px solid rgba(130,175,255,.95); color:#fff;'
+                                  : 'background:' + (day.isToday ? 'rgba(255,255,255,.1)' : 'rgba(255,255,255,.025)') + '; border:1px solid ' + (day.isToday ? 'rgba(255,255,255,.3)' : 'rgba(255,255,255,.14)') + '; color:transparent;') +
+                                (day.isToday ? 'box-shadow:0 -4px 0 rgba(255,255,255,.055), 0 4px 0 rgba(255,255,255,.055);' : '')
+                              }
+                            >
+                              check
+                            </Box>
+                          )
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <Box
+                  onClick={() => openModal('habits')}
+                  sx="border:1px dashed rgba(255,255,255,.14); border-radius:10px; padding:12px; text-align:center; font-size:11px; color:rgba(255,255,255,.38); cursor:pointer;"
+                  hover="background:rgba(255,255,255,.05); border-color:rgba(255,255,255,.28)"
+                >
+                  Add your first habit
+                </Box>
+              )}
+            </div>
+
+            <div
               aria-label="Pomodoro timer"
               style={css(
-                'flex:1; min-height:220px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(12px,1.5vh,16px); display:flex; flex-direction:column; gap:12px;',
+                'flex:1 1 0; min-height:190px; background:rgba(9,13,20,.34); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.16); border-radius:18px; box-shadow:0 8px 32px rgba(0,0,0,.3); padding:clamp(12px,1.5vh,16px); display:flex; flex-direction:column; gap:12px;',
               )}
             >
               <div style={css('display:flex; align-items:center; gap:8px; flex-shrink:0;')}>
@@ -1927,7 +2233,10 @@ export default function App() {
                   <div
                     style={{
                       width:
-                        `${Math.max(0, Math.min(100, (pomodoro.secondsLeft / ((pomodoro.mode === 'work' ? pomodoro.workMinutes : pomodoro.breakMinutes) * 60)) * 100))}%`,
+                      `${(() => {
+                        const phaseSeconds = (pomodoro.mode === 'work' ? pomodoro.workMinutes : pomodoro.breakMinutes) * 60
+                        return phaseSeconds > 0 ? Math.max(0, Math.min(100, (pomodoro.secondsLeft / phaseSeconds) * 100)) : 0
+                      })()}%`,
                       height: '100%',
                       borderRadius: 999,
                       background: pomodoro.mode === 'work' ? '#4c8dff' : '#5dcaA5',
@@ -1943,12 +2252,32 @@ export default function App() {
                     <label key={key} style={css('display:flex; flex-direction:column; gap:5px; font-size:9.5px; font-weight:600; color:rgba(255,255,255,.45); text-transform:uppercase; letter-spacing:.08em;')}>
                       {key === 'workMinutes' ? 'Work' : 'Break'}
                       <input
-                        type="number"
-                        min="1"
-                        max="90"
-                        value={pomodoro[key]}
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        min="0"
+                        max="1440"
+                        value={pomodoroDrafts[key]}
                         aria-label={`${key === 'workMinutes' ? 'Work' : 'Break'} minutes`}
-                        onChange={(event) => updatePomodoroDuration(key, Number(event.target.value))}
+                        onFocus={() => setPomodoroDrafts((drafts) => ({ ...drafts, [key]: String(pomodoro[key]) }))}
+                        onChange={(event) => {
+                          const value = event.target.value
+                          if (/^\d*$/.test(value)) setPomodoroDrafts((drafts) => ({ ...drafts, [key]: value }))
+                        }}
+                        onBlur={() => {
+                          const raw = pomodoroDrafts[key]
+                          const value = Number(raw)
+                          if (!raw || !Number.isFinite(value)) {
+                            setPomodoroDrafts((drafts) => ({ ...drafts, [key]: String(pomodoro[key]) }))
+                            return
+                          }
+                          const minutes = Math.max(0, Math.min(1440, Math.trunc(value)))
+                          updatePomodoroDuration(key, minutes)
+                          setPomodoroDrafts((drafts) => ({ ...drafts, [key]: String(minutes) }))
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') event.currentTarget.blur()
+                        }}
                         style={css('width:100%; padding:7px 8px; font-size:12px; font-weight:600; color:rgba(255,255,255,.85);')}
                       />
                     </label>
@@ -1967,7 +2296,15 @@ export default function App() {
                   restart_alt
                 </Box>
                 <Box
-                  onClick={() => setPomodoro((current) => ({ ...current, running: !current.running }))}
+                  onClick={() =>
+                    setPomodoro((current) => {
+                      if (current.running) {
+                        const resolved = resolvePomodoro(current)
+                        return { ...resolved, running: false, endAt: null }
+                      }
+                      return { ...current, running: true, endAt: Date.now() + Math.max(1, current.secondsLeft) * 1000 }
+                    })
+                  }
                   sx="flex:1; border-radius:10px; padding:9px 12px; text-align:center; font-size:12px; font-weight:700; color:#fff; cursor:pointer; background:rgba(76,141,255,.95);"
                   hover="background:rgba(96,157,255,1)"
                 >
@@ -2235,14 +2572,60 @@ export default function App() {
 
                   {dayList.length > 0 && (
                     <div style={css('display:flex; flex-direction:column; gap:7px;')}>
-                      <div style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.42);')}>JOURNAL</div>
+                      <div style={css('display:flex; align-items:center; justify-content:space-between; gap:10px;')}>
+                        <div style={css('font-size:10px; font-weight:600; letter-spacing:.16em; color:rgba(255,255,255,.42);')}>JOURNAL</div>
+                        <span style={css('font-size:10px; color:rgba(255,255,255,.28);')}>Drag to reorder</span>
+                      </div>
                       {dayList.map((n) => (
                         <Box
                           key={n.id}
                           onClick={() => set({ dnOpen: null, dnFormOpen: true, dnEditing: n.id, dnTitle: n.title, dnDesc: n.desc, dnCat: n.category })}
+                          draggable
+                          onDragStart={(e: React.DragEvent) => {
+                            e.stopPropagation()
+                            setDragDateNote(n.id)
+                          }}
+                          onDragOver={(e: React.DragEvent) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            if (dragOverDateNote !== n.id) setDragOverDateNote(n.id)
+                          }}
+                          onDrop={(e: React.DragEvent) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            set((st) => {
+                              const key = st.dateOpen
+                              const fromId = dragDateNote
+                              if (!key || fromId == null || fromId === n.id) return {}
+                              const list = [...(st.dateNotes[key] || [])]
+                              const from = list.findIndex((item) => item.id === fromId)
+                              const to = list.findIndex((item) => item.id === n.id)
+                              if (from < 0 || to < 0) return {}
+                              const [moved] = list.splice(from, 1)
+                              list.splice(to, 0, moved)
+                              return { dateNotes: { ...st.dateNotes, [key]: list } }
+                            })
+                            setDragDateNote(null)
+                            setDragOverDateNote(null)
+                          }}
+                          onDragEnd={() => {
+                            setDragDateNote(null)
+                            setDragOverDateNote(null)
+                          }}
                           role="button"
                           aria-label={`Open journal note ${n.title}`}
-                          sx="display:flex; align-items:center; gap:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.12); border-radius:11px; padding:11px 13px; cursor:pointer;"
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            background: 'rgba(255,255,255,.04)',
+                            border: dragOverDateNote === n.id && dragDateNote !== n.id ? '1px solid rgba(120,170,255,.85)' : '1px solid rgba(255,255,255,.12)',
+                            borderRadius: 11,
+                            padding: '11px 10px 11px 13px',
+                            cursor: dragDateNote === n.id ? 'grabbing' : 'grab',
+                            opacity: dragDateNote === n.id ? 0.55 : 1,
+                            transition: 'background .12s, border-color .12s, opacity .12s',
+                          }}
                           hover="background:rgba(255,255,255,.09); border-color:rgba(255,255,255,.22)"
                         >
                           <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: catColor(n.category) }} />
@@ -2254,6 +2637,29 @@ export default function App() {
                             {n.title}
                           </span>
                           <span style={css('font-size:10.5px; font-weight:600; color:rgba(255,255,255,.3); flex-shrink:0;')}>{clock(n.created)}</span>
+                          <Box
+                            onClick={(e: React.MouseEvent) => {
+                              e.stopPropagation()
+                              withUndo('Note deleted', ['dateNotes'], (st) => {
+                                const key = st.dateOpen!
+                                return { dateNotes: { ...st.dateNotes, [key]: (st.dateNotes[key] || []).filter((item) => item.id !== n.id) } }
+                              })
+                            }}
+                            role="button"
+                            aria-label={`Delete journal note ${n.title}`}
+                            title="Delete note"
+                            sx="width:25px; height:25px; border-radius:7px; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-family:'Material Symbols Rounded'; font-size:15px; line-height:1; color:rgba(255,255,255,.32); cursor:pointer;"
+                            hover="background:rgba(248,113,113,.16); color:rgba(255,150,150,.95)"
+                          >
+                            delete
+                          </Box>
+                          <span
+                            aria-hidden="true"
+                            title="Drag to reorder"
+                            style={{ fontFamily: 'Material Symbols Rounded', fontSize: 16, lineHeight: 1, color: 'rgba(255,255,255,.28)', flexShrink: 0, cursor: 'grab' }}
+                          >
+                            drag_indicator
+                          </span>
                         </Box>
                       ))}
                     </div>
@@ -2605,6 +3011,12 @@ export default function App() {
                     id="jv-create-board"
                     onClick={async () => {
                       if (!s.dBoardName.trim()) return
+                      if (editingBoardId) {
+                        await renameBoardName(editingBoardId, s.dBoardName)
+                        setEditingBoardId(null)
+                        closeModal()
+                        return
+                      }
                       const id = await addBoard(s.dBoardName.trim())
                       if (s.bmReturn && s.dBmName.trim() && s.dBmUrl.trim()) {
                         const url = /^https?:/.test(s.dBmUrl) ? s.dBmUrl : 'https://' + s.dBmUrl
@@ -2618,7 +3030,7 @@ export default function App() {
                     }}
                     style={css('background:rgba(76,141,255,.95); border-radius:11px; padding:10px 20px; font-size:12.5px; font-weight:600; cursor:pointer;')}
                   >
-                    Create board
+                    {editingBoardId ? 'Save name' : 'Create board'}
                   </div>
                 </div>
               </div>
@@ -2682,7 +3094,14 @@ export default function App() {
 
             {s.modal === 'bmsearch' && (
               <div style={css('display:flex; flex-direction:column; gap:14px;')}>
-                <input value={s.bmQuery} onChange={(e) => set({ bmQuery: e.target.value })} placeholder="Search bookmarks, URLs, boards..." style={css('padding:12px 14px; font-size:13.5px;')} />
+                <input
+                  ref={bookmarkSearchRef}
+                  autoFocus
+                  value={s.bmQuery}
+                  onChange={(e) => set({ bmQuery: e.target.value })}
+                  placeholder="Search bookmarks, URLs, boards..."
+                  style={css('padding:12px 14px; font-size:13.5px;')}
+                />
                 <div style={css('max-height:46vh; overflow-y:auto; display:flex; flex-direction:column; gap:16px;')}>
                   {bmResults.map((g) => (
                     <div key={g.name} style={css('display:flex; flex-direction:column; gap:5px;')}>
@@ -2813,32 +3232,6 @@ export default function App() {
               </div>
             )}
 
-            {s.modal === 'privacy' && (
-              <div style={css('display:flex; flex-direction:column; gap:18px;')}>
-                <div style={css('font-size:13px; color:rgba(255,255,255,.72); line-height:1.65;')}>
-                  Open a private browsing window? Incognito hides activity from this device only — websites, your network and your provider can still see it.
-                </div>
-                {incognitoHint && <div style={css('font-size:12px; color:rgba(255,200,120,.95); line-height:1.6;')}>{incognitoHint}</div>}
-                <div style={css('display:flex; justify-content:flex-end; gap:8px;')}>
-                  <div onClick={closeModal} style={css('padding:10px 16px; font-size:12.5px; font-weight:600; color:rgba(255,255,255,.55); cursor:pointer;')}>
-                    Cancel
-                  </div>
-                  <div
-                    onClick={async () => {
-                      const r = await openIncognito()
-                      if (r === 'ok') closeModal()
-                      else if (r === 'not-allowed')
-                        setIncognitoHint('Enable "Allow in Incognito" for Locus on chrome://extensions, then try again.')
-                      else setIncognitoHint('Incognito is only available when running as an extension.')
-                    }}
-                    style={css('border-radius:11px; padding:10px 20px; font-size:12.5px; font-weight:600; cursor:pointer; color:#fff; background:rgba(76,141,255,.95);')}
-                  >
-                    Open incognito
-                  </div>
-                </div>
-              </div>
-            )}
-
             {s.modal === 'clearhistory' && (
               <div style={css('display:flex; flex-direction:column; gap:18px;')}>
                 <div style={css('font-size:13px; color:rgba(255,255,255,.72); line-height:1.65;')}>
@@ -2868,6 +3261,34 @@ export default function App() {
       {s.bgAdjust && s.bgImage && (
         <WallpaperAdjust src={s.bgImage} value={bgT} onChange={setBgT} onDone={() => set({ bgAdjust: false })} />
       )}
+
+      {showMorningBrief && profileName && (
+        <MorningBrief
+          name={profileName}
+          tasks={briefTasks}
+          yesterdayPendingTasks={yesterdayPendingTasks}
+          habits={briefHabits}
+          yesterdayDone={yesterdayDone}
+          yesterdayTotal={yesterdayTotal}
+          quote={morningQuote}
+          onClose={closeMorningBrief}
+          onToggleTask={toggleTask}
+          onEditTask={(task) => {
+            closeMorningBrief()
+            editTask(task)
+          }}
+          onOpenHabits={() => {
+            closeMorningBrief()
+            openModal('habits')
+          }}
+          onOpenJournal={() => {
+            closeMorningBrief()
+            set({ dateOpen: todayIso, dnOpen: null, dnFormOpen: false, dnEditing: null, dnTitle: '', dnDesc: '', dnCat: 'Personal' })
+          }}
+        />
+      )}
+
+      {showOnboarding && <Onboarding onComplete={completeOnboarding} />}
 
       <Suspense fallback={null}>{showTour && <Walkthrough onClose={() => setShowTour(false)} />}</Suspense>
     </div>

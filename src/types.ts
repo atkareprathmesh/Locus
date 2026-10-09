@@ -23,6 +23,8 @@ export interface Task {
   time: string
   priority: Priority
   completed: boolean
+  /** Local date when the task was last completed, used for daily summaries. */
+  completedAt?: string
   /** 'none' | 'at' | minutes-before as a string ('5' | '15' | '60' | '1440') */
   remind: string
   /** Checklist steps belonging to this task. */
