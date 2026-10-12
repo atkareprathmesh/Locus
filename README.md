@@ -36,6 +36,14 @@ Locus keeps the useful parts of your day together on every new tab:
 Everything stays in the browser. There is no account, server, analytics, or
 runtime network dependency.
 
+## A workspace that feels familiar
+
+One Locus workspace might hold an arXiv reading list, a GitHub build queue, a
+few Figma and YouTube Studio links, notes from a research session, a habit to
+read ten pages, and the one task that should not get lost today. The point is
+not to organise a perfect life—it is to make the scattered pieces visible
+enough to choose what comes next.
+
 ## Try it locally
 
 Locus is currently loaded as an unpacked Chrome extension.
